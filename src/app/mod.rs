@@ -75,7 +75,20 @@ enum Side {
     Settings,
 }
 
+/// `weather_shark screenshot`: render once everything has loaded, save, quit.
+pub struct ShotOpts {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub path: std::path::PathBuf,
+    pub panes: Option<Vec<Moment>>,
+    pub view_km: Option<f32>,
+    pub layout: Option<crate::config::LayoutMode>,
+    /// centre the view on (lat, lon)
+    pub at: Option<(f64, f64)>,
+}
+
 pub struct App {
+    shot: Option<ShotOpts>,
+    shot_ready_frames: u32,
     cfg: Config,
     cfg_error: Option<String>,
     editor: String,
@@ -99,6 +112,10 @@ pub struct App {
     listed: Vec<i64>,
     scan: Option<Scan>,
     loading: Option<String>,
+    /// bytes downloaded / total for the scan being loaded
+    progress: Option<(usize, Option<usize>)>,
+    /// last few fully loaded scans
+    cache: Vec<(String, Arc<Volume>)>,
     generation: u64,
     live: bool,
     target: Option<i64>,
@@ -156,7 +173,11 @@ const PRODUCT_ORDER: [Moment; 6] = [
 
 impl App {
     /// `start` optionally opens a past scan: (site, "YYYY-MM-DD HH:MM").
-    pub fn new(cc: &eframe::CreationContext<'_>, start: Option<(String, String)>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        start: Option<(String, String)>,
+        shot: Option<ShotOpts>,
+    ) -> Self {
         let (tx, rx) = channel();
         let net = Net::new(tx, cc.egui_ctx.clone());
 
@@ -169,10 +190,21 @@ impl App {
             .and_then(|s| s.get_string(STORE_KEY))
             .unwrap_or_else(|| crate::config::DEFAULT_LUA.to_string());
 
-        let (cfg, cfg_error) = match Config::from_lua(&src) {
+        let (mut cfg, cfg_error) = match Config::from_lua(&src) {
             Ok(c) => (c, None),
             Err(e) => (Config::default_config(), Some(e)),
         };
+        if let Some(s) = &shot {
+            if let Some(p) = &s.panes {
+                cfg.panes = p.clone();
+            }
+            if let Some(v) = s.view_km {
+                cfg.view_km = v;
+            }
+            if let Some(l) = s.layout {
+                cfg.layout.mode = l;
+            }
+        }
         let sites = sites();
         let site = cfg.site.clone();
         let (lat, lon) = sites
@@ -190,6 +222,8 @@ impl App {
             .collect();
 
         let mut app = Self {
+            shot,
+            shot_ready_frames: 0,
             cfg_error,
             editor: src,
             editor_dirty: false,
@@ -209,6 +243,8 @@ impl App {
             listed: Vec::new(),
             scan: None,
             loading: None,
+            progress: None,
+            cache: Vec::new(),
             generation: 0,
             live: cfg.live,
             target: None,
@@ -249,6 +285,9 @@ impl App {
         match start.and_then(|(s, t)| Some((s.to_uppercase(), net::parse_time(&t)?))) {
             Some((s, t)) => app.select_site(&s, Some(t + 60)),
             None => app.select_site(&site, None),
+        }
+        if let Some((lat, lon)) = app.shot.as_ref().and_then(|s| s.at) {
+            app.center = app.map.proj.fwd(lon, lat).to_vec2();
         }
         app
     }
@@ -393,6 +432,7 @@ impl App {
         self.keys.clear();
         self.listed.clear();
         self.loading = None;
+        self.progress = None;
         self.error = None;
         self.target = target;
         match target {
@@ -419,8 +459,65 @@ impl App {
         {
             return;
         }
+        // recently viewed scans are kept, so stepping back and forth is instant
+        if let Some(vol) = self
+            .cache
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+        {
+            self.loading = None;
+            self.progress = None;
+            self.show_scan(key.to_string(), vol);
+            return;
+        }
         self.loading = Some(key.to_string());
+        self.progress = Some((0, None));
         self.net.volume(key);
+    }
+
+    /// Show a scan (or a newer snapshot of the one on screen). Sweeps never change
+    /// once decoded, so images already made for this scan are kept.
+    fn show_scan(&mut self, key: String, vol: Arc<Volume>) {
+        match &mut self.scan {
+            Some(s) if s.key == key => s.vol = vol,
+            _ => {
+                self.generation += 1;
+                self.textures.clear();
+                self.scan = Some(Scan {
+                    vol,
+                    key,
+                    generation: self.generation,
+                });
+            }
+        }
+    }
+
+    /// 0..1 while a scan downloads (None if the size isn't known yet).
+    fn load_fraction(&self) -> Option<f32> {
+        match self.progress {
+            Some((got, Some(total))) if total > 0 => {
+                Some((got as f32 / total as f32).clamp(0.0, 1.0))
+            }
+            _ => None,
+        }
+    }
+
+    fn progress_text(&self) -> String {
+        let mb = |b: usize| b as f32 / 1_048_576.0;
+        match self.progress {
+            Some((got, Some(total))) => format!("{:.1} / {:.1} MB", mb(got), mb(total)),
+            Some((got, None)) => format!("{:.1} MB", mb(got)),
+            None => String::new(),
+        }
+    }
+
+    fn cache_put(&mut self, key: &str, vol: Arc<Volume>) {
+        self.cache.retain(|(k, _)| k != key);
+        self.cache.push((key.to_string(), vol));
+        if self.cache.len() > 6 {
+            self.cache.remove(0);
+        }
     }
 
     fn pick_scan(&mut self) {
@@ -594,23 +691,31 @@ impl App {
                         Err(e) => self.error = Some(e),
                     }
                 }
-                Msg::Volume { key, vol } => {
+                Msg::Volume { key, vol, done } => {
                     if self.loading.as_deref() != Some(key.as_str()) {
                         continue;
                     }
-                    self.loading = None;
+                    if done {
+                        self.loading = None;
+                        self.progress = None;
+                    }
                     match vol {
                         Ok(vol) => {
-                            self.generation += 1;
-                            self.textures.clear();
                             self.error = None;
-                            self.scan = Some(Scan {
-                                vol,
-                                key,
-                                generation: self.generation,
-                            });
+                            if done {
+                                log::info!("loaded {key} ({} sweeps)", vol.sweeps.len());
+                                self.cache_put(&key, vol.clone());
+                            } else {
+                                log::debug!("early view of {key}: {} sweeps", vol.sweeps.len());
+                            }
+                            self.show_scan(key, vol);
                         }
                         Err(e) => self.error = Some(e),
+                    }
+                }
+                Msg::Progress { key, got, total } => {
+                    if self.loading.as_deref() == Some(key.as_str()) {
+                        self.progress = Some((got, total));
                     }
                 }
                 Msg::Alerts(res) => match res {
@@ -729,6 +834,40 @@ impl App {
         )
     }
 
+    /// Screenshot mode: once the scan, map tiles and images are in and the
+    /// layout has stopped animating, grab the frame, save it and quit.
+    fn take_screenshot_when_ready(&mut self, ctx: &egui::Context) {
+        let Some(shot) = &self.shot else { return };
+        ctx.request_repaint();
+        let ready = self.scan.is_some()
+            && self.loading.is_none()
+            && self.tiles.template.is_some()
+            && self.tiles.inflight() == 0
+            && !self.textures.is_empty();
+        self.shot_ready_frames = if ready { self.shot_ready_frames + 1 } else { 0 };
+        if self.shot_ready_frames != 45 {
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = shot.path.clone();
+            let ctx2 = ctx.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                egui::ScreenshotCallback::new(move |img| {
+                    match crate::png::write(&path, &img) {
+                        Ok(()) => {
+                            println!("saved {} ({}x{})", path.display(), img.size[0], img.size[1])
+                        }
+                        Err(e) => eprintln!("couldn't save {}: {e}", path.display()),
+                    }
+                    ctx2.send_viewport_cmd(egui::ViewportCommand::Close);
+                }),
+            ));
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = shot;
+    }
+
     fn keys_input(&mut self, ui: &Ui) {
         if ui.ctx().memory(|m| m.focused().is_some()) {
             return;
@@ -839,6 +978,19 @@ impl eframe::App for App {
                         ui.set_height(40.0);
                         self.top_bar(ui, now)
                     });
+                // download progress: a thin line along the bottom edge of the bar
+                if self.loading.is_some() {
+                    let full = ui.max_rect().expand2(vec2(12.0, 0.0));
+                    let y = full.max.y;
+                    let f = self.load_fraction().unwrap_or(0.04);
+                    let line = Rect::from_min_max(
+                        pos2(full.min.x, y - 2.0),
+                        pos2(full.min.x + full.width() * f, y),
+                    );
+                    ui.painter()
+                        .with_clip_rect(full.expand(1.0))
+                        .rect_filled(line, 0, t.accent);
+                }
             });
 
         if self.side != Side::None {
@@ -884,11 +1036,12 @@ impl eframe::App for App {
                 self.request_tiles();
                 self.error_toast(ui, area);
             });
+        self.take_screenshot_when_ready(&ctx);
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         #[cfg(target_arch = "wasm32")]
-        if !self.editor_dirty {
+        if !self.editor_dirty && self.shot.is_none() {
             _storage.set_string(STORE_KEY, self.editor.clone());
         }
     }

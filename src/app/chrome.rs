@@ -87,6 +87,10 @@ impl App {
             }
             if self.loading.is_some() || (self.scan.is_none() && self.error.is_none()) {
                 ui.spinner();
+                if let Some(f) = self.load_fraction() {
+                    ui.label(RichText::new(format!("{:.0}%", f * 100.0)).color(t.accent))
+                        .on_hover_text(self.progress_text());
+                }
             }
             if ui.button("◀").on_hover_text("previous scan (←)").clicked() {
                 self.step(-1);

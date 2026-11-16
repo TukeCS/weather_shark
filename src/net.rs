@@ -19,9 +19,16 @@ pub enum Msg {
         site: String,
         keys: Result<Vec<String>, String>,
     },
+    /// `done` = false for an early snapshot of the sweeps decoded so far.
     Volume {
         key: String,
         vol: Result<Arc<Volume>, String>,
+        done: bool,
+    },
+    Progress {
+        key: String,
+        got: usize,
+        total: Option<usize>,
     },
     Alerts(Result<Vec<Alert>, String>),
     TileJson(Result<String, String>),
@@ -74,26 +81,91 @@ impl Net {
         });
     }
 
+    /// Stream a volume: report progress, and hand over the sweeps decoded so far
+    /// as they finish (lowest tilt first) so the radar shows up early.
     pub fn volume(&self, key: &str) {
+        struct St {
+            dec: Option<level2::Decoder>,
+            got: usize,
+            total: Option<usize>,
+            reported: usize,
+            sent_sweeps: usize,
+        }
         let url = format!("{BUCKET}/{key}");
         let me = self.clone();
         let key = key.to_string();
-        ehttp::fetch(ehttp::Request::get(url), move |res| {
-            let vol = res.and_then(|r| {
-                if !r.ok {
-                    return Err(format!("download failed: HTTP {}", r.status));
+        let st = std::sync::Mutex::new(St {
+            dec: Some(level2::Decoder::new()),
+            got: 0,
+            total: None,
+            reported: 0,
+            sent_sweeps: 0,
+        });
+        ehttp::streaming::fetch(ehttp::Request::get(url), move |part| {
+            use ehttp::streaming::Part;
+            use std::ops::ControlFlow;
+            let mut st = st.lock().unwrap();
+            let fail = |e: String| {
+                me.send(Msg::Volume {
+                    key: key.clone(),
+                    vol: Err(e),
+                    done: true,
+                });
+                ControlFlow::Break(())
+            };
+            match part {
+                Err(e) => fail(e),
+                Ok(Part::Response(r)) => {
+                    if !r.ok {
+                        return fail(format!("download failed: HTTP {}", r.status));
+                    }
+                    st.total = r.headers.get("content-length").and_then(|v| v.parse().ok());
+                    ControlFlow::Continue(())
                 }
-                let t = web_time::Instant::now();
-                let v = level2::parse(&r.bytes).map(Arc::new);
-                log::debug!(
-                    "decoded {} ({} KB) in {:?}",
-                    r.url,
-                    r.bytes.len() / 1024,
-                    t.elapsed()
-                );
-                v
-            });
-            me.send(Msg::Volume { key, vol });
+                Ok(Part::Chunk(c)) if c.is_empty() => {
+                    let vol = st
+                        .dec
+                        .take()
+                        .map_or_else(|| Err("download ended twice".into()), |d| d.finish())
+                        .map(Arc::new);
+                    me.send(Msg::Volume {
+                        key: key.clone(),
+                        vol,
+                        done: true,
+                    });
+                    ControlFlow::Break(())
+                }
+                Ok(Part::Chunk(c)) => {
+                    st.got += c.len();
+                    let sent = st.sent_sweeps;
+                    let Some(dec) = st.dec.as_mut() else {
+                        return ControlFlow::Break(());
+                    };
+                    if let Err(e) = dec.push(&c) {
+                        return fail(e);
+                    }
+                    // Hand over each newly finished sweep among the first few (the low tilts).
+                    let done = dec.sweeps_done();
+                    let snap = (done > sent && done <= 6).then(|| dec.snapshot()).flatten();
+                    if let Some(v) = snap {
+                        st.sent_sweeps = done;
+                        me.send(Msg::Volume {
+                            key: key.clone(),
+                            vol: Ok(Arc::new(v)),
+                            done: false,
+                        });
+                    }
+                    if st.got - st.reported > 96 * 1024 {
+                        st.reported = st.got;
+                        me.send(Msg::Progress {
+                            key: key.clone(),
+                            got: st.got,
+                            total: st.total,
+                        });
+                    }
+                    ControlFlow::Continue(())
+                }
+            }
         });
     }
 

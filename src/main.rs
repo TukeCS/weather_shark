@@ -5,6 +5,8 @@ mod level2;
 mod map;
 mod mvt;
 mod net;
+#[cfg(not(target_arch = "wasm32"))]
+mod png;
 mod radio;
 mod render;
 mod sound;
@@ -100,6 +102,46 @@ fn main() -> eframe::Result {
         }
         _ => {}
     }
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    // `weather_shark screenshot out.png KTLX "2013-05-20 20:13" [--panes REF,VEL] [--view 40]`
+    let mut shot = None;
+    if args.first().map(String::as_str) == Some("screenshot") {
+        let flag = |args: &mut Vec<String>, name: &str| -> Option<String> {
+            let i = args.iter().position(|a| a == name)?;
+            let v = args.get(i + 1).cloned();
+            args.drain(i..(i + 2).min(args.len()));
+            v
+        };
+        let panes = flag(&mut args, "--panes")
+            .map(|p| p.split(',').filter_map(level2::Moment::from_key).collect());
+        let view_km = flag(&mut args, "--view").and_then(|v| v.parse().ok());
+        let at = flag(&mut args, "--at").and_then(|v| {
+            let (a, b) = v.split_once(',')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        });
+        let layout = flag(&mut args, "--layout").map(|l| match l.as_str() {
+            "columns" => config::LayoutMode::Columns,
+            "grid" => config::LayoutMode::Grid,
+            "dwindle" => config::LayoutMode::Dwindle,
+            _ => config::LayoutMode::Spiral,
+        });
+        args.remove(0);
+        if args.is_empty() {
+            eprintln!(
+                "usage: weather_shark screenshot OUT.png [SITE [\"YYYY-MM-DD HH:MM\"]] [--panes REF,VEL] [--view KM] [--layout columns] [--at LAT,LON]"
+            );
+            std::process::exit(2);
+        }
+        shot = Some(app::ShotOpts {
+            path: args.remove(0).into(),
+            panes,
+            view_km,
+            layout,
+            at,
+        });
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("weather_shark")
@@ -109,14 +151,14 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     // `weather_shark KTLX "2013-05-20 20:08"` opens a past scan
-    let mut args = std::env::args().skip(1);
-    let start = args
+    let mut rest = args.into_iter();
+    let start = rest
         .next()
-        .map(|site| (site, args.collect::<Vec<_>>().join(" ")));
+        .map(|site| (site, rest.collect::<Vec<_>>().join(" ")));
     eframe::run_native(
         "weather_shark",
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc, start)))),
+        Box::new(|cc| Ok(Box::new(app::App::new(cc, start, shot)))),
     )
 }
 
@@ -143,7 +185,7 @@ fn main() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(|cc| Ok(Box::new(app::App::new(cc, start)))),
+                Box::new(|cc| Ok(Box::new(app::App::new(cc, start, None)))),
             )
             .await
             .expect("failed to start weather_shark");
@@ -214,6 +256,43 @@ mod tests {
             key_time("2013/05/20/KTLX/KTLX20130520_200356_V06.gz"),
             Some(t - 8 * 60 + 236)
         );
+    }
+
+    /// WS_SAMPLE: streaming in 64 KB chunks must match a one-shot decode, and the
+    /// lowest tilt should be ready well before the end of the file.
+    #[test]
+    fn streaming_matches_whole_file() {
+        let Ok(p) = std::env::var("WS_SAMPLE") else {
+            return;
+        };
+        let bytes = std::fs::read(p).unwrap();
+        let whole = level2::parse(&bytes).unwrap();
+        let mut d = level2::Decoder::new();
+        let mut ready_at = None;
+        for (i, c) in bytes.chunks(64 * 1024).enumerate() {
+            d.push(c).unwrap();
+            if ready_at.is_none() {
+                if let Some(v) = d.snapshot() {
+                    let ok = |m| v.sweep_for(m, 0.5).is_some_and(|s| s.elevation < 0.7);
+                    if ok(level2::Moment::Ref) && ok(level2::Moment::Vel) {
+                        ready_at = Some((i + 1) * 64 * 1024);
+                    }
+                }
+            }
+        }
+        let streamed = d.finish().unwrap();
+        assert_eq!(whole.sweeps.len(), streamed.sweeps.len());
+        for (a, b) in whole.sweeps.iter().zip(&streamed.sweeps) {
+            assert_eq!((a.number, a.radials.len()), (b.number, b.radials.len()));
+        }
+        let at = ready_at.unwrap();
+        eprintln!(
+            "0.5° REF+VEL ready after {} of {} KB ({:.0}%)",
+            at / 1024,
+            bytes.len() / 1024,
+            100.0 * at as f64 / bytes.len() as f64
+        );
+        assert!(at < bytes.len() / 2);
     }
 
     /// Set WS_SAMPLE=path/to/level2/file to also render it to WS_OUT (a .ppm).

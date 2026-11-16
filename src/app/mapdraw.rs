@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, vec2};
+use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 
 use super::App;
 use crate::map::Layer;
@@ -222,8 +222,14 @@ impl App {
         }
         cands.sort_by_key(|c| c.0);
 
-        // Radar sites (dot + ID) are drawn on top, so keep labels clear of them.
-        let mut placed: Vec<Rect> = Vec::new();
+        // Keep labels off the pane header, the legend and the radar sites drawn on top.
+        let mut placed: Vec<Rect> = vec![
+            Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 44.0)),
+            Rect::from_min_max(
+                pos2(rect.min.x, rect.max.y - 46.0),
+                pos2(rect.min.x + 250.0, rect.max.y),
+            ),
+        ];
         if self.show.sites {
             for s in &self.sites {
                 let p = self.ll_to_screen(rect, s.lon, s.lat);

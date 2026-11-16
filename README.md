@@ -12,6 +12,10 @@ tables, panes, alert rules and sounds.
 
 ![weather_shark showing the 2013 Moore tornado supercell over Oklahoma City, with interstates, highway numbers and town names](screenshots/moore.webp)
 
+![Reflectivity next to velocity for the Moore tornado at 20:12 UTC: the hook echo's debris ball on the left lines up with the tight velocity couplet on the right, just west of Moore](screenshots/moore-ref-vel.webp)
+
+<sub>The 2013 Moore tornado at 20:12 UTC: the debris ball in reflectivity (left) sits right on the velocity couplet (right).</sub>
+
 ## Why
 
 i got tired of paying subscriptions
@@ -30,6 +34,8 @@ i got tired of paying subscriptions
 - NOAA Weather Radio: live streams from the transmitters nearest your radar
 - Bookmarks for past events (Moore, El Reno, Joplin, Mayfield, Rolling Fork)
 - Lua config that hot-reloads on save, with an in-app editor
+- Scans are decoded while they download: the lowest tilt shows up after roughly a fifth of the
+  file, with a progress bar for the rest, and recent scans are cached so stepping through them is instant
 
 ## Running
 
@@ -44,6 +50,12 @@ building needs the `libasound` headers. To check your speakers:
 ```sh
 weather_shark test-sound siren      # or alarm, beep, chime
 weather_shark test-sound radio      # 15 s of the Oklahoma City NOAA Weather Radio stream
+```
+
+The README screenshots are made by the app itself:
+
+```sh
+weather_shark screenshot out.png KTLX "2013-05-20 20:13" --panes REF,VEL --layout columns --view 14 --at 35.21,-97.54
 ```
 
 ### Keys
@@ -126,7 +138,7 @@ Opening the page with `#KTLX 2013-05-20 20:08` in the URL starts on that scan.
 
 ## How it works
 
-- `level2.rs`: Archive II decoder. It reads the volume header, unpacks the bzip2 LDM records and parses message 31 radials into sweeps.
+- `level2.rs`: Archive II decoder. It reads the volume header, unpacks the bzip2 LDM records and parses message 31 radials into sweeps. It works incrementally, so finished sweeps (lowest tilt first) are shown while the rest of the file streams in.
 - `render.rs`: rasterizes a sweep to a texture once, using an azimuth lookup table and a colour lookup per raw byte. Pan and zoom are then just GPU work.
 - `config.rs`: runs the Lua in [piccolo](https://github.com/kyren/piccolo), a Lua VM written in pure Rust. That's what lets the config work in WebAssembly too.
 - `alerts.rs`, `sound.rs`: NWS alert matching. Sounds are synthesized in Rust and played with rodio on native and Web Audio in the browser.

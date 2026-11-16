@@ -5,6 +5,7 @@
 //! messages; we only care about message 31 (one radial of every moment).
 
 use std::io::Read;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Moment {
@@ -152,6 +153,7 @@ impl Sweep {
     }
 }
 
+#[derive(Clone)]
 pub struct Volume {
     pub site: String,
     pub lat: f64,
@@ -159,7 +161,8 @@ pub struct Volume {
     pub vcp: u16,
     /// Seconds since the Unix epoch.
     pub time: i64,
-    pub sweeps: Vec<Sweep>,
+    /// Finished sweeps, lowest tilt first. Shared, so partial snapshots are cheap.
+    pub sweeps: Vec<Arc<Sweep>>,
 }
 
 impl Volume {
@@ -178,15 +181,17 @@ impl Volume {
     /// The sweep to show for a moment at a tilt. At split cuts the first sweep
     /// has the longest-range reflectivity; velocity comes from the Doppler cut.
     pub fn sweep_for(&self, m: Moment, tilt: f32) -> Option<&Sweep> {
-        let near = |s: &&Sweep| (s.elevation - tilt).abs() < 0.25 && s.has(m);
-        self.sweeps.iter().find(near).or_else(|| {
-            self.sweeps.iter().filter(|s| s.has(m)).min_by(|a, b| {
-                (a.elevation - tilt)
-                    .abs()
-                    .partial_cmp(&(b.elevation - tilt).abs())
-                    .unwrap()
+        let sweeps = || self.sweeps.iter().map(|s| &**s);
+        sweeps()
+            .find(|s| (s.elevation - tilt).abs() < 0.25 && s.has(m))
+            .or_else(|| {
+                sweeps().filter(|s| s.has(m)).min_by(|a, b| {
+                    (a.elevation - tilt)
+                        .abs()
+                        .partial_cmp(&(b.elevation - tilt).abs())
+                        .unwrap()
+                })
             })
-        })
     }
 }
 
@@ -200,100 +205,236 @@ fn bef32(b: &[u8], o: usize) -> f32 {
     f32::from_bits(be32(b, o))
 }
 
+/// Decode a whole file at once.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse(bytes: &[u8]) -> Result<Volume, String> {
-    // Old archive files in the bucket are gzipped as a whole.
-    let unzipped;
-    let bytes = if bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut out = Vec::new();
-        flate2::read::MultiGzDecoder::new(bytes)
-            .read_to_end(&mut out)
-            .map_err(|e| format!("gunzip: {e}"))?;
-        unzipped = out;
-        &unzipped[..]
-    } else {
-        bytes
-    };
+    let mut d = Decoder::new();
+    d.push(bytes)?;
+    d.finish()
+}
 
-    if bytes.len() < 24 || &bytes[..4] != b"AR2V" {
-        return Err("not a Level II file".into());
+/// Incremental decoder: feed it the file as it downloads. Sweeps come out
+/// lowest tilt first, so the 0.5° scan is usable long before the file ends.
+pub struct Decoder {
+    gz: Option<flate2::write::MultiGzDecoder<Vec<u8>>>,
+    sniffed: Vec<u8>,
+    raw: Vec<u8>,
+    pos: usize,
+    header: bool,
+    /// None until we've seen what follows the header: Some(true) = bzip2 LDM
+    /// records (2008+), Some(false) = a plain stream of messages (older files).
+    ldm: Option<bool>,
+    vol: Volume,
+    cur: Option<Sweep>,
+}
+
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new()
     }
-    let julian = be32(bytes, 12) as i64;
-    let ms = be32(bytes, 16) as i64;
-    let site = String::from_utf8_lossy(&bytes[20..24]).trim().to_string();
+}
 
-    let mut buf = Vec::with_capacity(bytes.len() * 6);
-    let mut pos = 24;
-    while pos + 4 <= bytes.len() {
-        let size = (be32(bytes, pos) as i32).unsigned_abs() as usize;
-        pos += 4;
-        if size == 0 || pos + size > bytes.len() {
-            break;
+impl Decoder {
+    pub fn new() -> Self {
+        Self {
+            gz: None,
+            sniffed: Vec::new(),
+            raw: Vec::new(),
+            pos: 0,
+            header: false,
+            ldm: None,
+            vol: Volume {
+                site: String::new(),
+                lat: 0.0,
+                lon: 0.0,
+                vcp: 0,
+                time: 0,
+                sweeps: Vec::new(),
+            },
+            cur: None,
         }
-        let chunk = &bytes[pos..pos + size];
-        if chunk.starts_with(b"BZh") {
-            bzip2::read::MultiBzDecoder::new(chunk)
-                .read_to_end(&mut buf)
-                .map_err(|e| format!("bzip2: {e}"))?;
-        } else {
-            buf.extend_from_slice(chunk);
-        }
-        pos += size;
-    }
-    if buf.is_empty() {
-        // Pre-2008 style uncompressed files
-        buf.extend_from_slice(&bytes[24..]);
     }
 
-    let mut vol = Volume {
-        site,
-        lat: 0.0,
-        lon: 0.0,
-        vcp: 0,
-        time: (julian - 1) * 86400 + ms / 1000,
-        sweeps: Vec::new(),
-    };
+    /// Completed sweeps so far.
+    pub fn sweeps_done(&self) -> usize {
+        self.vol.sweeps.len()
+    }
 
-    let mut off = 0;
-    while off + 28 <= buf.len() {
-        let h = off + 12;
-        let size_hw = be16(&buf, h) as usize;
-        let mtype = buf[h + 3];
-        if mtype == 31 && size_hw > 0 {
-            let len = size_hw * 2;
-            let end = (h + len).min(buf.len());
-            if let Some((radial, number, site)) = parse_m31(&buf[h + 16..end], &mut vol) {
-                if vol.site.is_empty() {
-                    vol.site = site;
-                }
-                match vol.sweeps.last_mut() {
-                    Some(s) if s.number == number => s.radials.push(radial),
-                    _ => vol.sweeps.push(Sweep {
-                        number,
-                        elevation: radial.elevation,
-                        radials: vec![radial],
-                    }),
-                }
+    /// Feed more bytes. Old archive files are gzipped as a whole, so unzip on the fly.
+    pub fn push(&mut self, data: &[u8]) -> Result<(), String> {
+        if !self.header && self.gz.is_none() && self.raw.is_empty() && self.sniffed.len() < 2 {
+            self.sniffed.extend_from_slice(data);
+            if self.sniffed.len() < 2 {
+                return Ok(());
             }
-            off = h + len;
-        } else {
-            off += 2432;
+            let first = std::mem::take(&mut self.sniffed);
+            if first.starts_with(&[0x1f, 0x8b]) {
+                self.gz = Some(flate2::write::MultiGzDecoder::new(Vec::new()));
+            }
+            return self.push_inner(&first);
+        }
+        self.push_inner(data)
+    }
+
+    fn push_inner(&mut self, data: &[u8]) -> Result<(), String> {
+        match &mut self.gz {
+            Some(gz) => {
+                use std::io::Write;
+                gz.write_all(data).map_err(|e| format!("gunzip: {e}"))?;
+                let out = std::mem::take(gz.get_mut());
+                self.raw.extend_from_slice(&out);
+            }
+            None => self.raw.extend_from_slice(data),
+        }
+        self.records()
+    }
+
+    /// Process every complete LDM record in the buffer.
+    fn records(&mut self) -> Result<(), String> {
+        if !self.header {
+            if self.raw.len() < 24 {
+                return Ok(());
+            }
+            if &self.raw[..4] != b"AR2V" {
+                return Err("not a Level II file".into());
+            }
+            let julian = be32(&self.raw, 12) as i64;
+            let ms = be32(&self.raw, 16) as i64;
+            self.vol.site = String::from_utf8_lossy(&self.raw[20..24])
+                .trim()
+                .to_string();
+            self.vol.time = (julian - 1) * 86400 + ms / 1000;
+            self.header = true;
+            self.pos = 24;
+        }
+        if self.ldm.is_none() {
+            if self.raw.len() < self.pos + 8 {
+                return Ok(());
+            }
+            let p = self.pos;
+            let compressed = &self.raw[p + 4..p + 7] == b"BZh";
+            self.ldm = Some(compressed || be32(&self.raw, p) != 0);
+        }
+        if self.ldm == Some(false) {
+            // one message at a time: msg 31 has its own length, the rest are 2432 bytes
+            while self.pos + 28 <= self.raw.len() {
+                let h = self.pos + 12;
+                let size_hw = be16(&self.raw, h) as usize;
+                let len = if self.raw[h + 3] == 31 && size_hw > 0 {
+                    12 + size_hw * 2
+                } else {
+                    2432
+                };
+                if self.pos + len > self.raw.len() {
+                    break;
+                }
+                let msg = self.raw[self.pos..self.pos + len].to_vec();
+                self.pos += len;
+                self.messages(&msg);
+            }
+        }
+        while self.ldm == Some(true) {
+            if self.pos + 4 > self.raw.len() {
+                break;
+            }
+            let size = (be32(&self.raw, self.pos) as i32).unsigned_abs() as usize;
+            if size == 0 {
+                self.pos += 4;
+                continue;
+            }
+            if self.pos + 4 + size > self.raw.len() {
+                break; // wait for the rest of this record
+            }
+            let chunk = self.raw[self.pos + 4..self.pos + 4 + size].to_vec();
+            self.pos += 4 + size;
+            if chunk.starts_with(b"BZh") {
+                let mut buf = Vec::with_capacity(size * 6);
+                bzip2::read::MultiBzDecoder::new(&chunk[..])
+                    .read_to_end(&mut buf)
+                    .map_err(|e| format!("bzip2: {e}"))?;
+                self.messages(&buf);
+            } else {
+                self.messages(&chunk);
+            }
+        }
+        // Drop consumed input now and then so the buffer doesn't hold the whole file.
+        if self.pos > 1 << 20 {
+            self.raw.drain(..self.pos);
+            self.pos = 0;
+        }
+        Ok(())
+    }
+
+    fn messages(&mut self, buf: &[u8]) {
+        let mut off = 0;
+        while off + 28 <= buf.len() {
+            let h = off + 12;
+            let size_hw = be16(buf, h) as usize;
+            let mtype = buf[h + 3];
+            if mtype == 31 && size_hw > 0 {
+                let len = size_hw * 2;
+                let end = (h + len).min(buf.len());
+                if let Some((radial, number, status, site)) =
+                    parse_m31(&buf[h + 16..end], &mut self.vol)
+                {
+                    if self.vol.site.is_empty() {
+                        self.vol.site = site;
+                    }
+                    if self.cur.as_ref().is_some_and(|c| c.number != number) {
+                        self.close_sweep();
+                    }
+                    self.cur
+                        .get_or_insert_with(|| Sweep {
+                            number,
+                            elevation: radial.elevation,
+                            radials: Vec::new(),
+                        })
+                        .radials
+                        .push(radial);
+                    // 2 = end of elevation, 4 = end of volume
+                    if status == 2 || status == 4 {
+                        self.close_sweep();
+                    }
+                }
+                off = h + len;
+            } else {
+                off += 2432;
+            }
         }
     }
 
-    for s in &mut vol.sweeps {
+    fn close_sweep(&mut self) {
+        let Some(mut s) = self.cur.take() else { return };
+        if s.radials.len() <= 100 {
+            return;
+        }
         let n = s.radials.len() as f32;
         s.elevation = s.radials.iter().map(|r| r.elevation).sum::<f32>() / n;
         s.radials
             .sort_by(|a, b| a.azimuth.partial_cmp(&b.azimuth).unwrap());
+        self.vol.sweeps.push(Arc::new(s));
     }
-    vol.sweeps.retain(|s| s.radials.len() > 100);
-    if vol.sweeps.is_empty() {
-        return Err("no radar data in file".into());
+
+    /// The completed sweeps so far, as a volume (cheap: sweeps are shared).
+    pub fn snapshot(&self) -> Option<Volume> {
+        (!self.vol.sweeps.is_empty()).then(|| self.vol.clone())
     }
-    Ok(vol)
+
+    pub fn finish(mut self) -> Result<Volume, String> {
+        if let Some(gz) = self.gz.take() {
+            let rest = gz.finish().map_err(|e| format!("gunzip: {e}"))?;
+            self.raw.extend_from_slice(&rest);
+            self.records()?;
+        }
+        self.close_sweep();
+        if self.vol.sweeps.is_empty() {
+            return Err("no radar data in file".into());
+        }
+        Ok(self.vol)
+    }
 }
 
-fn parse_m31(b: &[u8], vol: &mut Volume) -> Option<(Radial, u8, String)> {
+fn parse_m31(b: &[u8], vol: &mut Volume) -> Option<(Radial, u8, u8, String)> {
     if b.len() < 32 {
         return None;
     }
@@ -348,5 +489,5 @@ fn parse_m31(b: &[u8], vol: &mut Volume) -> Option<(Radial, u8, String)> {
             _ => {}
         }
     }
-    Some((radial, number, site))
+    Some((radial, number, b[21], site))
 }

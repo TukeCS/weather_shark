@@ -54,7 +54,7 @@ impl App {
             let d = resp.drag_delta();
             self.center += vec2(-d.x, d.y) / self.zoom;
         }
-        if let Some(p) = resp.hover_pos() {
+        if let Some(p) = resp.hover_pos().filter(|_| self.shot.is_none()) {
             self.hovered_pane = Some(idx);
             self.hover = Some(self.to_km(rect, p));
             let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
@@ -204,19 +204,65 @@ impl App {
         }
 
         if self.scan.is_none() {
-            let msg = if let Some(e) = &self.error {
-                e.clone()
-            } else {
-                format!("loading {}…", self.site)
-            };
-            painter.text(
-                rect.center() + vec2(0.0, 40.0),
-                Align2::CENTER_CENTER,
-                msg,
-                FontId::monospace(13.0),
-                t.muted,
-            );
+            let at = rect.center() + vec2(0.0, 44.0);
+            match (&self.error, self.load_fraction()) {
+                (Some(e), _) => {
+                    painter.text(
+                        at,
+                        Align2::CENTER_CENTER,
+                        e,
+                        FontId::monospace(13.0),
+                        t.muted,
+                    );
+                }
+                (None, frac) => {
+                    let what = match self.progress {
+                        Some((got, _)) if got > 0 => {
+                            format!("downloading {} · {}", self.site, self.progress_text())
+                        }
+                        _ => format!("finding the latest {} scan…", self.site),
+                    };
+                    painter.text(
+                        at,
+                        Align2::CENTER_CENTER,
+                        what,
+                        FontId::monospace(12.0),
+                        t.muted,
+                    );
+                    let bar = Rect::from_center_size(at + vec2(0.0, 18.0), vec2(220.0, 4.0));
+                    painter.rect_filled(bar, 2, t.line);
+                    let f = frac.unwrap_or(0.0);
+                    if f > 0.0 {
+                        let fill =
+                            Rect::from_min_size(bar.min, vec2(bar.width() * f, bar.height()));
+                        painter.rect_filled(fill, 2, t.accent);
+                    } else {
+                        // unknown size yet: a sliding pulse
+                        let x =
+                            ((ui.input(|i| i.time) * 0.8).fract() as f32) * (bar.width() - 50.0);
+                        painter.rect_filled(
+                            Rect::from_min_size(bar.min + vec2(x, 0.0), vec2(50.0, bar.height())),
+                            2,
+                            t.accent,
+                        );
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
         }
+
+        // header: a soft band so map lines don't run through the labels
+        let band = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 44.0));
+        painter.rect_filled(
+            band,
+            egui::CornerRadius {
+                nw: t.radius as u8,
+                ne: t.radius as u8,
+                sw: 0,
+                se: 0,
+            },
+            t.panel.gamma_multiply(0.82),
+        );
 
         // header: product picker, close button, readout
         let head =

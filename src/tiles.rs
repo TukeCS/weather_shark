@@ -98,6 +98,10 @@ impl Tiles {
         }
     }
 
+    pub fn inflight(&self) -> usize {
+        self.inflight
+    }
+
     pub fn failed_count(&self) -> usize {
         self.slots
             .values()
