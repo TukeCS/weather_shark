@@ -511,38 +511,18 @@ impl App {
                 .inner_margin(10)
                 .show(ui, |ui| {
                     ui.set_width(card_w);
-                    egui::Sides::new().show(
-                        ui,
-                        |ui| {
-                            let (b, _) = ui.allocate_exact_size(vec2(4.0, 16.0), Sense::hover());
-                            ui.painter().rect_filled(b, 2, col);
-                            ui.label(RichText::new(&al.event).color(col).strong());
-                            if let Some(tag) = al.tag() {
-                                ui.label(RichText::new(tag).small().background_color(col.gamma_multiply(0.25)).color(col));
-                            }
-                            if simulated {
-                                ui.label(RichText::new("TEST").small().background_color(t.line).color(t.fg));
-                            }
-                        },
-                        |ui| {
-                            let id = al.id.clone();
-                            if simulated {
-                                if ui.small_button("×").on_hover_text("remove this test warning").clicked() {
-                                    out = Some((CardAction::Remove, id));
-                                }
-                            } else if hidden {
-                                if ui.small_button("show").on_hover_text("put it back on the map").clicked() {
-                                    out = Some((CardAction::Show, id));
-                                }
-                            } else if ui
-                                .small_button("hide")
-                                .on_hover_text("hide it from the map (it stays in the list under HIDDEN, and you can show it again)")
-                                .clicked()
-                            {
-                                out = Some((CardAction::Hide, id));
-                            }
-                        },
-                    );
+                    // title row (wraps on narrow panels)
+                    ui.horizontal_wrapped(|ui| {
+                        let (b, _) = ui.allocate_exact_size(vec2(4.0, 16.0), Sense::hover());
+                        ui.painter().rect_filled(b, 2, col);
+                        ui.label(RichText::new(&al.event).color(col).strong());
+                        if let Some(tag) = al.tag() {
+                            ui.label(RichText::new(tag).small().background_color(col.gamma_multiply(0.25)).color(col));
+                        }
+                        if simulated {
+                            ui.label(RichText::new("TEST").small().background_color(t.line).color(t.fg));
+                        }
+                    });
                     if !hidden {
                         ui.label(RichText::new(&al.area).small());
                         let mut extra = String::new();
@@ -552,8 +532,28 @@ impl App {
                         if let Some(e) = al.expires.get(11..16) {
                             extra += &format!("until {e} local");
                         }
-                        ui.label(RichText::new(extra).color(t.muted).small());
+                        if !extra.is_empty() {
+                            ui.label(RichText::new(extra).color(t.muted).small());
+                        }
                     }
+                    // actions row: hide / show, and remove for test warnings
+                    ui.horizontal(|ui| {
+                        let id = al.id.clone();
+                        if hidden {
+                            if ui.small_button("show").on_hover_text("put its polygon back on the map").clicked() {
+                                out = Some((CardAction::Show, id.clone()));
+                            }
+                        } else if ui
+                            .small_button("hide")
+                            .on_hover_text("hide its polygon from the map (it stays in the list under HIDDEN, and you can show it again)")
+                            .clicked()
+                        {
+                            out = Some((CardAction::Hide, id.clone()));
+                        }
+                        if simulated && ui.small_button("remove").on_hover_text("delete this test warning").clicked() {
+                            out = Some((CardAction::Remove, id));
+                        }
+                    });
                 });
         });
         if out.is_none() && card.response.on_hover_text(&al.headline).clicked() {
@@ -717,7 +717,7 @@ mod tests {
         New,
     }
 
-    /// Render a card like the alerts panel's, click the × and report (× clicked, card clicked).
+    /// Render a card like the alerts panel's, click its button and report (button clicked, card clicked).
     fn click_x(kind: Card) -> (bool, bool) {
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(360.0, 300.0));
@@ -750,16 +750,13 @@ mod tests {
                 let body = |ui: &mut egui::Ui, x: &mut bool, x_rect: &mut Rect| {
                     egui::Frame::new().inner_margin(10).show(ui, |ui| {
                         ui.set_width(300.0);
-                        egui::Sides::new().show(
-                            ui,
-                            |ui| ui.label("Tornado Warning"),
-                            |ui| {
-                                let r = ui.small_button("×");
-                                *x_rect = r.rect;
-                                *x |= r.clicked();
-                            },
-                        );
+                        ui.horizontal_wrapped(|ui| ui.label("Tornado Warning"));
                         ui.label("Simulated County (test)");
+                        ui.horizontal(|ui| {
+                            let r = ui.small_button("remove");
+                            *x_rect = r.rect;
+                            *x |= r.clicked();
+                        });
                     })
                 };
                 let card = match kind {
@@ -788,7 +785,7 @@ mod tests {
         assert_eq!(
             new,
             (true, false),
-            "the × must receive the click, not the card"
+            "the button must receive the click, not the card"
         );
     }
 }

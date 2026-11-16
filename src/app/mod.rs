@@ -719,6 +719,8 @@ impl App {
     fn clear_simulated(&mut self, id: Option<&str>) {
         let gone = |a: &Alert| a.id.starts_with("simulated-") && id.is_none_or(|i| a.id == i);
         self.simulated.retain(|(a, _)| !gone(a));
+        self.hidden
+            .retain(|h| !(h.starts_with("simulated-") && id.is_none_or(|i| h == i)));
         self.alerts.retain(|(a, _)| !gone(a));
         if !self
             .alerts
