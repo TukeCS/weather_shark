@@ -10,6 +10,8 @@ tables, panes, alert rules and sounds.
 
 **[Live demo](https://tuke.gg/demos/weather_shark/)** (the same code compiled to WebAssembly)
 
+![weather_shark showing the 2013 Moore tornado supercell over Oklahoma City, with interstates, highway numbers and town names](screenshots/moore.webp)
+
 ## Why
 
 i got tired of paying subscriptions
