@@ -161,6 +161,8 @@ and matched to transmitter locations from the NWS station list. Their terms allo
 but not relaying, and they block clients that open several streams at once. So weather_shark only
 ever plays one stream, straight from their server.
 
+![The radio panel listing the NOAA Weather Radio transmitters nearest KTLX, from Oklahoma City (32 km) outwards, next to the Moore tornado on radar](screenshots/radio-panel.webp)
+
 Streams can lag 30 seconds or more, so don't rely on them for warnings: use a real NWR receiver.
 
 ## Web build
