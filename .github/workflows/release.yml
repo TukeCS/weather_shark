@@ -19,10 +19,11 @@ jobs:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz }
           - { os: macos-latest, target: aarch64-apple-darwin, archive: tar.gz }
-          - { os: macos-13, target: x86_64-apple-darwin, archive: tar.gz }
+          # Intel Macs: cross-compiled on the Apple Silicon runner (Xcode can target both)
+          - { os: macos-latest, target: x86_64-apple-darwin, archive: tar.gz }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -43,6 +44,22 @@ jobs:
             cp target/${{ matrix.target }}/release/weather_shark "$name"/
             tar czf "$name.tar.gz" "$name"
           fi
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: weather_shark-*.${{ matrix.archive }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            A NEXRAD radar viewer for tracking tornadoes. Try it in the browser first: https://tuke.gg/demos/weather_shark/
+
+            **Downloads**
+            - **Windows:** `x86_64-pc-windows-msvc.zip`, unzip and run `weather_shark.exe`
+            - **macOS (Apple Silicon):** `aarch64-apple-darwin.tar.gz`
+            - **macOS (Intel):** `x86_64-apple-darwin.tar.gz`
+            - **Linux:** `x86_64-unknown-linux-gnu.tar.gz` (needs ALSA; sound goes through PipeWire/PulseAudio)
+
+            The builds aren't code-signed, so the first launch shows a warning:
+            on Windows click "More info" → "Run anyway"; on macOS run
+            `xattr -d com.apple.quarantine weather_shark` once (or right-click → Open).
+
+            Your config is created on first run; `weather_shark --help` shows where.

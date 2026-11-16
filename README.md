@@ -45,8 +45,12 @@ i got tired of paying subscriptions
 
 ## Install
 
-Download a build for Linux, macOS or Windows from the
-[releases page](https://github.com/TukeCS/weather_shark/releases), or build it yourself:
+Download a build for Linux, macOS (Apple Silicon or Intel) or Windows from the
+[releases page](https://github.com/TukeCS/weather_shark/releases). They aren't code-signed, so the
+first launch warns you: on Windows click "More info" → "Run anyway"; on macOS run
+`xattr -d com.apple.quarantine weather_shark` once (or right-click → Open).
+
+Or build it yourself:
 
 ```sh
 cargo install --git https://github.com/TukeCS/weather_shark
