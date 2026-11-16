@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  native:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev
+      - run: cargo build --release --locked
+      - run: cargo test --release --locked
+      - run: cargo clippy --release --locked -- -D warnings
+      - name: Config loads and validates
+        run: |
+          cargo run --release --locked -- default-config > config.lua
+          cargo run --release --locked -- check config.lua
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target wasm32-unknown-unknown

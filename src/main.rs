@@ -1,3 +1,6 @@
+// No console window behind the app in Windows release builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod alerts;
 mod app;
 mod config;
@@ -12,13 +15,28 @@ mod render;
 mod sound;
 mod tiles;
 
+/// Where config.lua lives:
+/// - `$XDG_CONFIG_HOME/weather_shark/` if that's set (any OS)
+/// - Linux: `~/.config/weather_shark/`
+/// - macOS: `~/.config/weather_shark/` if it exists, else `~/Library/Application Support/weather_shark/`
+/// - Windows: `%APPDATA%\weather_shark\`
 #[cfg(not(target_arch = "wasm32"))]
 pub fn config_path() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|| ".".into());
-    base.join("weather_shark").join("config.lua")
+    use std::path::PathBuf;
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let home = env("HOME").or_else(|| env("USERPROFILE"));
+    let dir = if let Some(x) = env("XDG_CONFIG_HOME") {
+        x.join("weather_shark")
+    } else if cfg!(target_os = "windows") {
+        env("APPDATA").or_else(|| home.clone().map(|h| h.join("AppData").join("Roaming"))).unwrap_or_else(|| ".".into()).join("weather_shark")
+    } else if cfg!(target_os = "macos") {
+        let h = home.unwrap_or_else(|| ".".into());
+        let dot = h.join(".config").join("weather_shark");
+        if dot.exists() { dot } else { h.join("Library").join("Application Support").join("weather_shark") }
+    } else {
+        home.unwrap_or_else(|| ".".into()).join(".config").join("weather_shark")
+    };
+    dir.join("config.lua")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
