@@ -1,0 +1,343 @@
+//! One radar pane: input (pan/zoom/click), radar image, map layers, header and legend.
+
+use egui::{
+    Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureOptions, Ui, UiBuilder,
+    pos2, vec2,
+};
+
+use super::App;
+use crate::level2::Moment;
+use crate::render;
+
+impl App {
+    fn texture(&mut self, ctx: &egui::Context, m: Moment) -> Option<(egui::TextureHandle, f32)> {
+        let scan = self.scan.as_ref()?;
+        let sweep = scan.vol.sweep_for(m, self.tilt)?;
+        let key = (scan.generation, sweep.number, m);
+        if let Some(t) = self.textures.get(&key) {
+            return Some(t.clone());
+        }
+        let range = render::range_km(sweep, m).clamp(50.0, 470.0);
+        let img = render::rasterize(
+            sweep,
+            m,
+            self.cfg.palette(m),
+            self.cfg.unit_factor(m),
+            self.cfg.image_size,
+            range,
+        );
+        let opts = if self.cfg.smooth {
+            TextureOptions::LINEAR
+        } else {
+            TextureOptions::NEAREST
+        };
+        let tex = ctx.load_texture(format!("{}-{}-{:?}", scan.key, sweep.number, m), img, opts);
+        self.textures.insert(key, (tex.clone(), range));
+        Some((tex, range))
+    }
+
+    pub(super) fn pane(&mut self, ui: &mut Ui, rect: Rect, idx: usize) {
+        if rect.width() < 40.0 || rect.height() < 40.0 {
+            return; // mid-animation sliver
+        }
+        let t = self.cfg.theme.clone();
+        let ms = self.cfg.map.clone();
+        let m = self.panes[idx].moment;
+        let id = egui::Id::NULL.with(("pane", self.panes[idx].id));
+        let resp = ui.interact(rect, id, Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+
+        // input: drag to pan, scroll/pinch to zoom around the cursor
+        if resp.dragged() {
+            self.fitted = true;
+            self.user_moved = true;
+            let d = resp.drag_delta();
+            self.center += vec2(-d.x, d.y) / self.zoom;
+        }
+        if let Some(p) = resp.hover_pos() {
+            self.hovered_pane = Some(idx);
+            self.hover = Some(self.to_km(rect, p));
+            let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+            let factor = (scroll * 0.0018).exp() * pinch;
+            if factor != 1.0 {
+                self.user_moved = true;
+                let before = self.to_km(rect, p);
+                self.zoom = (self.zoom * factor).clamp(0.05, 200.0);
+                let after = self.to_km(rect, p);
+                self.center += before - after;
+            }
+        }
+        if resp.double_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            self.center = self.to_km(rect, p).to_vec2();
+            self.zoom = (self.zoom * 2.0).min(200.0);
+        }
+
+        painter.rect_filled(rect, t.radius, t.panel);
+
+        // basemap under the radar: counties and minor roads
+        if self.show.counties
+            && let Some(c) = ms.counties.filter(|_| self.zoom > 0.6)
+        {
+            self.draw_layer(&painter, rect, &self.map.counties_km, c, 0.8);
+        }
+        let tiles = self.visible_tiles(rect);
+        if self.show.roads {
+            self.draw_roads(&painter, rect, &tiles, true);
+        }
+
+        // radar image
+        if let Some((tex, range)) = self.texture(ui.ctx(), m) {
+            let a = self.to_screen(rect, pos2(-range, range));
+            let b = self.to_screen(rect, pos2(range, -range));
+            painter.image(
+                tex.id(),
+                Rect::from_two_pos(a, b),
+                Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+
+        // over the radar: main roads, state lines, rings, warnings
+        if self.show.roads {
+            self.draw_roads(&painter, rect, &tiles, false);
+        }
+        if let Some(c) = ms.states {
+            self.draw_layer(&painter, rect, &self.map.states_km, c, 1.2);
+        }
+        if self.show.rings
+            && let Some(c) = ms.range_rings
+        {
+            let o = self.to_screen(rect, Pos2::ZERO);
+            for r in (50..=450).step_by(50) {
+                painter.circle_stroke(o, r as f32 * self.zoom, Stroke::new(1.0, c));
+            }
+        }
+        if self.show.warnings {
+            self.draw_warnings(&painter, rect);
+        }
+        self.draw_labels(&painter, rect, &tiles);
+
+        // radar sites (click to switch)
+        let pointer = resp.hover_pos();
+        let mut hovered_site = None;
+        if self.show.sites {
+            for s in &self.sites {
+                let p = self.ll_to_screen(rect, s.lon, s.lat);
+                if !rect.expand(20.0).contains(p) {
+                    continue;
+                }
+                let cur = s.id == self.site;
+                let near = pointer.is_some_and(|q| q.distance(p) < 10.0);
+                if near {
+                    hovered_site = Some(s.id.clone());
+                }
+                let r = if near { 5.0 } else { 3.5 };
+                painter.circle_filled(p, r + 1.5, t.bg.gamma_multiply(0.8));
+                painter.circle_filled(p, r, if cur { t.fg } else { ms.sites });
+                if cur {
+                    painter.circle_stroke(p, 7.0, Stroke::new(1.5, ms.sites));
+                }
+                if ms.site_labels && (self.zoom > 0.35 || near || cur) {
+                    super::mapdraw::halo_text(
+                        &painter,
+                        p + vec2(7.0, -7.0),
+                        Align2::LEFT_BOTTOM,
+                        &s.id,
+                        FontId::monospace(10.5),
+                        if near { t.fg } else { ms.sites },
+                        t.bg,
+                    );
+                }
+            }
+        }
+        if let Some(s) = &hovered_site {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if resp.clicked() && *s != self.site {
+                let s = s.clone();
+                self.live = true;
+                self.select_site(&s, None);
+            }
+            resp.clone().on_hover_text(
+                self.sites
+                    .iter()
+                    .find(|x| x.id == *s)
+                    .map(|x| format!("{}  {}", x.id, x.name))
+                    .unwrap_or_default(),
+            );
+        }
+
+        // crosshair (shared by all panes)
+        let mut readout = None;
+        if let Some(h) = self.hover {
+            let p = self.to_screen(rect, h);
+            if rect.contains(p) {
+                let c = ms.crosshair;
+                for (a, b) in [
+                    (vec2(-9.0, 0.0), vec2(-3.0, 0.0)),
+                    (vec2(3.0, 0.0), vec2(9.0, 0.0)),
+                    (vec2(0.0, -9.0), vec2(0.0, -3.0)),
+                    (vec2(0.0, 3.0), vec2(0.0, 9.0)),
+                ] {
+                    painter.line_segment([p + a, p + b], Stroke::new(1.5, c));
+                }
+            }
+            if let Some(scan) = &self.scan
+                && let Some(sw) = scan.vol.sweep_for(m, self.tilt)
+            {
+                readout = Some(
+                    match render::sample(
+                        sw,
+                        m,
+                        self.cfg.unit_factor(m),
+                        self.cfg.palette(m).mask_ref,
+                        h.x,
+                        h.y,
+                    ) {
+                        Some(v) if m == Moment::Rho => format!("{v:.3}"),
+                        Some(v) => format!("{v:.1} {}", self.cfg.unit_label(m)),
+                        None => String::new(),
+                    },
+                );
+            }
+        }
+
+        if self.scan.is_none() {
+            let msg = if let Some(e) = &self.error {
+                e.clone()
+            } else {
+                format!("loading {}…", self.site)
+            };
+            painter.text(
+                rect.center() + vec2(0.0, 40.0),
+                Align2::CENTER_CENTER,
+                msg,
+                FontId::monospace(13.0),
+                t.muted,
+            );
+        }
+
+        // header: product picker, close button, readout
+        let head =
+            Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(rect.width() - 20.0, 24.0));
+        let mut close = false;
+        ui.scope_builder(
+            UiBuilder::new()
+                .max_rect(head)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                let mut sel = m;
+                egui::ComboBox::from_id_salt(("product", self.panes[idx].id))
+                    .selected_text(egui::RichText::new(m.key()).color(t.accent).strong())
+                    .width(64.0)
+                    .show_ui(ui, |ui| {
+                        for mm in Moment::ALL {
+                            ui.selectable_value(
+                                &mut sel,
+                                mm,
+                                format!("{:<4} {}", mm.key(), mm.title()),
+                            );
+                        }
+                    });
+                self.panes[idx].moment = sel;
+                if rect.width() > 360.0 {
+                    let elev = self
+                        .scan
+                        .as_ref()
+                        .and_then(|s| s.vol.sweep_for(m, self.tilt))
+                        .map(|s| s.elevation);
+                    let sub = match elev {
+                        Some(e) => format!("{} · {e:.1}°", m.title()),
+                        None => m.title().to_string(),
+                    };
+                    ui.label(egui::RichText::new(sub).color(t.muted).small());
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.panes.len() > 1
+                        && ui
+                            .small_button("×")
+                            .on_hover_text("close pane (x)")
+                            .clicked()
+                    {
+                        close = true;
+                    }
+                    if let Some(r) = readout {
+                        ui.label(egui::RichText::new(r).color(t.fg));
+                    }
+                });
+            },
+        );
+
+        // legend + attribution
+        let pal = self.cfg.palette(m);
+        let lw = (rect.width() - 24.0).min(220.0);
+        let lr = Rect::from_min_size(pos2(rect.min.x + 12.0, rect.max.y - 22.0), vec2(lw, 6.0));
+        let (lo, hi) = (pal.min(), pal.max());
+        let plate = Rect::from_min_max(lr.min - vec2(8.0, 18.0), lr.max + vec2(8.0, 7.0));
+        painter.rect_filled(plate, 6, t.panel.gamma_multiply(0.85));
+        let steps = 64;
+        for i in 0..steps {
+            let v = lo + (hi - lo) * (i as f32 + 0.5) / steps as f32;
+            let x0 = lr.min.x + lr.width() * i as f32 / steps as f32;
+            let x1 = lr.min.x + lr.width() * (i + 1) as f32 / steps as f32 + 0.5;
+            painter.rect_filled(
+                Rect::from_x_y_ranges(x0..=x1, lr.y_range()),
+                0,
+                pal.color(v),
+            );
+        }
+        let fmt = |v: f32| {
+            if m == Moment::Rho {
+                format!("{v:.2}")
+            } else {
+                format!("{v:.0}")
+            }
+        };
+        let small = FontId::monospace(10.0);
+        painter.text(
+            lr.left_top() - vec2(0.0, 3.0),
+            Align2::LEFT_BOTTOM,
+            fmt(lo),
+            small.clone(),
+            t.muted,
+        );
+        painter.text(
+            lr.right_top() - vec2(0.0, 3.0),
+            Align2::RIGHT_BOTTOM,
+            format!("{} {}", fmt(hi), self.cfg.unit_label(m)),
+            small.clone(),
+            t.muted,
+        );
+        if (self.show.roads || self.show.cities)
+            && self.tiles.template.is_some()
+            && rect.width() > 420.0
+        {
+            painter.text(
+                rect.right_bottom() - vec2(10.0, 8.0),
+                Align2::RIGHT_BOTTOM,
+                "© OpenStreetMap · OpenFreeMap",
+                small,
+                t.muted.gamma_multiply(0.7),
+            );
+        }
+
+        painter.rect_stroke(
+            rect,
+            t.radius,
+            Stroke::new(
+                1.0,
+                if self.hovered_pane == Some(idx) && self.panes.len() > 1 {
+                    t.line.gamma_multiply(1.8)
+                } else {
+                    t.line
+                },
+            ),
+            StrokeKind::Inside,
+        );
+
+        if close {
+            self.close_pane(idx);
+        }
+    }
+}

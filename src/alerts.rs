@@ -14,35 +14,49 @@ pub struct Alert {
     pub hail: Option<f32>,
     /// Outer rings of the warning polygon(s), as (lon, lat).
     pub polygons: Vec<Vec<(f64, f64)>>,
+    /// County FIPS codes from the SAME list (used for watches, which have no polygon).
+    pub counties: Vec<u32>,
+    /// True when the outline came from county borders rather than an NWS polygon.
+    pub county_based: bool,
 }
 
 impl Alert {
     pub fn confirmed(&self) -> bool {
-        self.tornado.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("observed"))
+        self.tornado
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("observed"))
     }
 
     pub fn emergency(&self) -> bool {
-        self.damage.as_deref().is_some_and(|d| d.eq_ignore_ascii_case("catastrophic"))
+        self.damage
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case("catastrophic"))
     }
 
     pub fn matches(&self, r: &AlertRule) -> bool {
         if !self.event.eq_ignore_ascii_case(&r.event) {
             return false;
         }
-        if let Some(t) = &r.tornado {
-            if !self.tornado.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(t)) {
-                return false;
-            }
+        if let Some(t) = &r.tornado
+            && !self
+                .tornado
+                .as_deref()
+                .is_some_and(|x| x.eq_ignore_ascii_case(t))
+        {
+            return false;
         }
-        if let Some(d) = &r.damage {
-            if !self.damage.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(d)) {
-                return false;
-            }
+        if let Some(d) = &r.damage
+            && !self
+                .damage
+                .as_deref()
+                .is_some_and(|x| x.eq_ignore_ascii_case(d))
+        {
+            return false;
         }
-        if let Some(h) = r.hail {
-            if !self.hail.is_some_and(|x| x >= h) {
-                return false;
-            }
+        if let Some(h) = r.hail
+            && !self.hail.is_some_and(|x| x >= h)
+        {
+            return false;
         }
         true
     }
@@ -51,7 +65,11 @@ impl Alert {
     pub fn tag(&self) -> Option<&'static str> {
         if self.emergency() {
             Some("EMERGENCY")
-        } else if self.damage.as_deref().is_some_and(|d| d.eq_ignore_ascii_case("considerable")) {
+        } else if self
+            .damage
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case("considerable"))
+        {
             Some("PDS")
         } else if self.confirmed() {
             Some("CONFIRMED")
@@ -67,8 +85,16 @@ fn first_param(p: &serde_json::Value, name: &str) -> Option<String> {
 
 pub fn parse(bytes: &[u8]) -> Result<Vec<Alert>, String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("alerts: {e}"))?;
-    let feats = v.get("features").and_then(|f| f.as_array()).ok_or("alerts: unexpected response")?;
-    let s = |x: &serde_json::Value, k: &str| x.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let feats = v
+        .get("features")
+        .and_then(|f| f.as_array())
+        .ok_or("alerts: unexpected response")?;
+    let s = |x: &serde_json::Value, k: &str| {
+        x.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     Ok(feats
         .iter()
         .filter_map(|f| {
@@ -85,7 +111,9 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Alert>, String> {
                 for poly in polys {
                     let ring = poly.get(0)?.as_array()?;
                     polygons.push(
-                        ring.iter().filter_map(|pt| Some((pt.get(0)?.as_f64()?, pt.get(1)?.as_f64()?))).collect(),
+                        ring.iter()
+                            .filter_map(|pt| Some((pt.get(0)?.as_f64()?, pt.get(1)?.as_f64()?)))
+                            .collect(),
                     );
                 }
             }
@@ -99,6 +127,15 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Alert>, String> {
                 damage: first_param(&params, "tornadoDamageThreat"),
                 hail: first_param(&params, "maxHailSize").and_then(|h| h.trim().parse().ok()),
                 polygons,
+                counties: p["geocode"]["SAME"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c.as_str()?.get(1..)?.parse().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                county_based: false,
             })
         })
         .collect())

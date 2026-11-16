@@ -31,10 +31,17 @@ return {
     tilt            = 0.5,      -- elevation angle in degrees
     velocity_units  = "kt",     -- "kt", "mph" or "ms" (the VEL palette below uses these units)
 
-    -- panes: one entry per pane, left to right (4 panes = 2x2 grid).
+    -- panes to open with. Add more with the + button (or n), close one with
+    -- its x (or x over it). Each new pane splits the last one, like a tiling WM.
     -- products: REF (reflectivity), VEL (velocity), CC (correlation coeff),
     --           ZDR (differential reflectivity), SW (spectrum width), PHI
-    panes           = { "REF", "VEL", "CC" },
+    panes           = { "REF" },
+
+    layout = {
+        mode  = "spiral",   -- "spiral" (fibonacci), "dwindle", "columns" or "grid"
+        ratio = 0.5,        -- how much of the space each split gives the older pane
+        gap   = 8,
+    },
 
     smooth          = false,    -- true = blur between gates, false = crisp radar pixels
     image_size      = 2048,     -- radar image resolution per pane (bigger = sharper when zoomed in)
@@ -59,6 +66,31 @@ return {
         sites        = col.accent,  -- radar site dots
         site_labels  = true,
         crosshair    = "#ffffffcc",
+        warnings     = true,        -- draw warning polygons / watch counties
+
+        -- roads and towns come from OpenStreetMap vector tiles (OpenFreeMap).
+        -- Any OpenMapTiles-schema TileJSON URL works here.
+        tiles        = "https://tiles.openfreemap.org/planet",
+        roads        = true,
+        road_labels  = true,        -- I-35, US 77 ... shields
+        cities       = true,
+        city_color   = col.fg,
+        road_colors  = {
+            motorway  = "#f0b45acc",
+            trunk     = "#c99a5e90",
+            primary   = "#c9c9d299",
+            secondary = "#a8a8b277",
+            tertiary  = "#8e8e9566",
+            minor     = "#8e8e9540", -- only drawn when zoomed in close
+        },
+    },
+
+    -- NOAA Weather Radio -------------------------------------------------------
+    -- Live streams from wxradio.org (volunteer-run, one stream at a time).
+    -- They can lag 30 s or more: never rely on them instead of a real NWR receiver.
+    radio = {
+        enabled = true,
+        volume  = 0.8,
     },
 
     -- colour tables: { value, colour } stops, blended in between.
@@ -154,6 +186,9 @@ return {
     --   repeats  how many times to play the sound
     --   volume   0..1
     --   color    outline colour on the map and in the list
+    --
+    -- Warnings come with a storm-based polygon. Watches don't, so they are
+    -- drawn as the outlines of the counties they cover (dashed).
 
     alerts = {
         enabled    = true,
@@ -166,7 +201,8 @@ return {
             { event = "Tornado Warning",                          sound = "alarm", repeats = 2, color = "#ff6b6b" },
             { event = "Severe Thunderstorm Warning", hail = 2.0,  sound = "beep",  color = col.orange },
             { event = "Severe Thunderstorm Warning",              sound = "chime", color = col.yellow },
-            { event = "Tornado Watch",                            sound = "none",  color = "#ff6b6b55" },
+            { event = "Tornado Watch",                            sound = "beep",  color = "#ff6b6b88" },
+            { event = "Severe Thunderstorm Watch",                sound = "none",  color = "#ffd60a66" },
         },
     },
 

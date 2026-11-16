@@ -8,13 +8,28 @@ use std::sync::mpsc::Sender;
 
 use crate::alerts::{self, Alert};
 use crate::level2::{self, Volume};
+use crate::mvt::{self, TileData};
+use crate::radio::{self, Station};
+use crate::tiles::Key;
 
 pub const BUCKET: &str = "https://unidata-nexrad-level2.s3.amazonaws.com";
 
 pub enum Msg {
-    Listing { site: String, keys: Result<Vec<String>, String> },
-    Volume { key: String, vol: Result<Arc<Volume>, String> },
+    Listing {
+        site: String,
+        keys: Result<Vec<String>, String>,
+    },
+    Volume {
+        key: String,
+        vol: Result<Arc<Volume>, String>,
+    },
     Alerts(Result<Vec<Alert>, String>),
+    TileJson(Result<String, String>),
+    Tile {
+        key: Key,
+        tile: Result<TileData, String>,
+    },
+    Radio(Result<Vec<Station>, String>),
 }
 
 #[derive(Clone)]
@@ -70,7 +85,12 @@ impl Net {
                 }
                 let t = web_time::Instant::now();
                 let v = level2::parse(&r.bytes).map(Arc::new);
-                log::debug!("decoded {} ({} KB) in {:?}", r.url, r.bytes.len() / 1024, t.elapsed());
+                log::debug!(
+                    "decoded {} ({} KB) in {:?}",
+                    r.url,
+                    r.bytes.len() / 1024,
+                    t.elapsed()
+                );
                 v
             });
             me.send(Msg::Volume { key, vol });
@@ -80,7 +100,10 @@ impl Net {
     pub fn alerts(&self, events: &[String]) {
         let mut ev: Vec<String> = events.iter().map(|e| e.replace(' ', "%20")).collect();
         ev.dedup();
-        let url = format!("https://api.weather.gov/alerts/active?status=actual&event={}", ev.join(","));
+        let url = format!(
+            "https://api.weather.gov/alerts/active?status=actual&event={}",
+            ev.join(",")
+        );
         let mut req = ehttp::Request::get(url);
         req.headers.insert("Accept", "application/geo+json");
         if !cfg!(target_arch = "wasm32") {
@@ -100,10 +123,68 @@ impl Net {
     }
 }
 
+impl Net {
+    /// Read a TileJSON document for its tile URL template.
+    pub fn tilejson(&self, url: &str) {
+        let me = self.clone();
+        ehttp::fetch(ehttp::Request::get(url), move |res| {
+            let t = res.and_then(|r| {
+                let v: serde_json::Value =
+                    serde_json::from_slice(&r.bytes).map_err(|e| format!("map tiles: {e}"))?;
+                v["tiles"][0]
+                    .as_str()
+                    .map(String::from)
+                    .ok_or_else(|| "map tiles: no tile URL".to_string())
+            });
+            me.send(Msg::TileJson(t));
+        });
+    }
+
+    pub fn tile(&self, template: &str, key: Key) {
+        let (z, x, y) = key;
+        let url = template
+            .replace("{z}", &z.to_string())
+            .replace("{x}", &x.to_string())
+            .replace("{y}", &y.to_string());
+        let me = self.clone();
+        ehttp::fetch(ehttp::Request::get(url), move |res| {
+            let tile = res.and_then(|r| {
+                if r.status == 204 || r.status == 404 {
+                    return Ok(TileData::default()); // empty ocean tile
+                }
+                if !r.ok {
+                    return Err(format!("HTTP {}", r.status));
+                }
+                let mut bytes = r.bytes;
+                if bytes.starts_with(&[0x1f, 0x8b]) {
+                    use std::io::Read;
+                    let mut out = Vec::new();
+                    flate2::read::GzDecoder::new(&bytes[..])
+                        .read_to_end(&mut out)
+                        .map_err(|e| e.to_string())?;
+                    bytes = out;
+                }
+                mvt::decode(&bytes, z, x, y)
+            });
+            me.send(Msg::Tile { key, tile });
+        });
+    }
+
+    pub fn radio_list(&self) {
+        let me = self.clone();
+        ehttp::fetch(ehttp::Request::get(radio::STATUS_URL), move |res| {
+            me.send(Msg::Radio(res.and_then(|r| radio::parse_status(&r.bytes))));
+        });
+    }
+}
+
 // ---- time helpers ----------------------------------------------------------------
 
 pub fn now() -> i64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// (year, month, day) for days since 1970-01-01.
@@ -144,8 +225,14 @@ pub fn parse_time(s: &str) -> Option<i64> {
     let (date, time) = s.split_once(' ').unwrap_or((&s, "00:00"));
     let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
     let (y, m, dd) = (d.next()??, d.next()??, d.next()??);
-    let mut t = time.trim_end_matches('Z').split(':').map(|x| x.parse::<i64>().ok());
-    let (h, mi) = (t.next().flatten().unwrap_or(0), t.next().flatten().unwrap_or(0));
+    let mut t = time
+        .trim_end_matches('Z')
+        .split(':')
+        .map(|x| x.parse::<i64>().ok());
+    let (h, mi) = (
+        t.next().flatten().unwrap_or(0),
+        t.next().flatten().unwrap_or(0),
+    );
     if !(1..=12).contains(&m) || !(1..=31).contains(&dd) {
         return None;
     }

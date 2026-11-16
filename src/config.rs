@@ -7,6 +7,8 @@ use piccolo::{Closure, Executor, Fuel, Lua, Table, Value};
 
 use crate::level2::Moment;
 
+pub const MAX_PANES: usize = 6;
+
 pub const DEFAULT_LUA: &str = include_str!("../assets/default_config.lua");
 
 // ---- Lua value tree ---------------------------------------------------------
@@ -18,13 +20,20 @@ pub enum L {
     Bool(bool),
     Num(f64),
     Str(String),
-    Table { arr: Vec<L>, map: Vec<(String, L)> },
+    Table {
+        arr: Vec<L>,
+        map: Vec<(String, L)>,
+    },
 }
 
 impl L {
     pub fn get(&self, key: &str) -> &L {
         match self {
-            L::Table { map, .. } => map.iter().find(|(k, _)| k == key).map(|(_, v)| v).unwrap_or(&L::Nil),
+            L::Table { map, .. } => map
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v)
+                .unwrap_or(&L::Nil),
             _ => &L::Nil,
         }
     }
@@ -105,9 +114,9 @@ pub fn run_lua(src: &str, platform: &str) -> Result<L, String> {
                 Err(e) => Err(e.to_string()),
             });
             return v.and_then(|v| match v {
-                    L::Table { .. } => Ok(v),
-                    _ => Err("config.lua must `return { ... }` a table".into()),
-                });
+                L::Table { .. } => Ok(v),
+                _ => Err("config.lua must `return { ... }` a table".into()),
+            });
         }
     }
     Err("config.lua took too long to run (infinite loop?)".into())
@@ -122,7 +131,11 @@ pub fn color(s: &str) -> Option<Color32> {
         6 => Some(Color32::from_rgb(p(0)?, p(2)?, p(4)?)),
         8 => Some(Color32::from_rgba_unmultiplied(p(0)?, p(2)?, p(4)?, p(6)?)),
         3 => {
-            let q = |i: usize| u8::from_str_radix(h.get(i..i + 1)?, 16).ok().map(|v| v * 17);
+            let q = |i: usize| {
+                u8::from_str_radix(h.get(i..i + 1)?, 16)
+                    .ok()
+                    .map(|v| v * 17)
+            };
             Some(Color32::from_rgb(q(0)?, q(1)?, q(2)?))
         }
         _ => None,
@@ -165,7 +178,12 @@ impl Palette {
 
 fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
+    Color32::from_rgba_unmultiplied(
+        l(a.r(), b.r()),
+        l(a.g(), b.g()),
+        l(a.b(), b.b()),
+        l(a.a(), b.a()),
+    )
 }
 
 #[derive(Clone)]
@@ -188,6 +206,36 @@ pub struct MapStyle {
     pub sites: Color32,
     pub site_labels: bool,
     pub crosshair: Color32,
+    /// Vector tiles (OpenMapTiles schema) for roads and towns: a TileJSON URL.
+    pub tiles: String,
+    pub roads: bool,
+    pub road_labels: bool,
+    pub cities: bool,
+    /// motorway, trunk, primary, secondary, tertiary, minor
+    pub road_colors: [Color32; 6],
+    pub city_color: Color32,
+    pub warnings: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LayoutMode {
+    Spiral,
+    Dwindle,
+    Columns,
+    Grid,
+}
+
+#[derive(Clone)]
+pub struct Layout {
+    pub mode: LayoutMode,
+    pub ratio: f32,
+    pub gap: f32,
+}
+
+#[derive(Clone)]
+pub struct RadioCfg {
+    pub enabled: bool,
+    pub volume: f32,
 }
 
 #[derive(Clone, Default)]
@@ -255,6 +303,8 @@ pub struct Config {
     pub image_size: usize,
     pub theme: Theme,
     pub map: MapStyle,
+    pub layout: Layout,
+    pub radio: RadioCfg,
     pub palettes: Vec<(Moment, Palette)>,
     pub alerts: AlertCfg,
     pub bookmarks: Vec<Bookmark>,
@@ -262,7 +312,12 @@ pub struct Config {
 
 impl Config {
     pub fn palette(&self, m: Moment) -> &Palette {
-        &self.palettes.iter().find(|(k, _)| *k == m).expect("every moment has a palette").1
+        &self
+            .palettes
+            .iter()
+            .find(|(k, _)| *k == m)
+            .expect("every moment has a palette")
+            .1
     }
 
     /// Multiplier from the radar's native units to display units.
@@ -288,15 +343,29 @@ impl Config {
     }
 
     pub fn from_lua(src: &str) -> Result<Self, String> {
-        let platform = if cfg!(target_arch = "wasm32") { "web" } else { "native" };
+        let platform = if cfg!(target_arch = "wasm32") {
+            "web"
+        } else {
+            "native"
+        };
         let root = run_lua(src, platform)?;
         // Anything the user leaves out falls back to the built-in config.
-        let base = if src == DEFAULT_LUA { L::Nil } else { run_lua(DEFAULT_LUA, platform)? };
+        let base = if src == DEFAULT_LUA {
+            L::Nil
+        } else {
+            run_lua(DEFAULT_LUA, platform)?
+        };
         Self::build(&root, &base)
     }
 
     fn build(r: &L, d: &L) -> Result<Self, String> {
-        let pick = |k: &str| if r.get(k).is_nil() { d.get(k) } else { r.get(k) };
+        let pick = |k: &str| {
+            if r.get(k).is_nil() {
+                d.get(k)
+            } else {
+                r.get(k)
+            }
+        };
         let sub = |sect: &str, k: &str| {
             let v = r.get(sect).get(k);
             if v.is_nil() { d.get(sect).get(k) } else { v }
@@ -304,11 +373,14 @@ impl Config {
         let col = |v: &L, what: &str| -> Result<Option<Color32>, String> {
             match v {
                 L::Nil | L::Bool(false) => Ok(None),
-                L::Str(s) => color(s).map(Some).ok_or_else(|| format!("{what}: bad colour {s:?}")),
+                L::Str(s) => color(s)
+                    .map(Some)
+                    .ok_or_else(|| format!("{what}: bad colour {s:?}")),
                 _ => Err(format!("{what}: expected a \"#rrggbb\" string")),
             }
         };
-        let need = |v: &L, what: &str| col(v, what)?.ok_or_else(|| format!("{what}: colour missing"));
+        let need =
+            |v: &L, what: &str| col(v, what)?.ok_or_else(|| format!("{what}: colour missing"));
 
         let theme = Theme {
             bg: need(sub("theme", "bg"), "theme.bg")?,
@@ -318,7 +390,10 @@ impl Config {
             muted: need(sub("theme", "muted"), "theme.muted")?,
             accent: need(sub("theme", "accent"), "theme.accent")?,
             radius: sub("theme", "radius").num().unwrap_or(10.0) as f32,
-            font_size: sub("theme", "font_size").num().unwrap_or(13.0).clamp(8.0, 32.0) as f32,
+            font_size: sub("theme", "font_size")
+                .num()
+                .unwrap_or(13.0)
+                .clamp(8.0, 32.0) as f32,
         };
         let map = MapStyle {
             states: col(sub("map", "states"), "map.states")?,
@@ -327,6 +402,53 @@ impl Config {
             sites: col(sub("map", "sites"), "map.sites")?.unwrap_or(theme.accent),
             site_labels: sub("map", "site_labels").bool().unwrap_or(true),
             crosshair: col(sub("map", "crosshair"), "map.crosshair")?.unwrap_or(Color32::WHITE),
+            tiles: sub("map", "tiles")
+                .str()
+                .unwrap_or("https://tiles.openfreemap.org/planet")
+                .to_string(),
+            roads: sub("map", "roads").bool().unwrap_or(true),
+            road_labels: sub("map", "road_labels").bool().unwrap_or(true),
+            cities: sub("map", "cities").bool().unwrap_or(true),
+            road_colors: {
+                let rc = |k: &str| -> Result<Color32, String> {
+                    let v = r.get("map").get("road_colors").get(k);
+                    let v = if v.is_nil() {
+                        d.get("map").get("road_colors").get(k)
+                    } else {
+                        v
+                    };
+                    Ok(col(v, &format!("map.road_colors.{k}"))?.unwrap_or(Color32::TRANSPARENT))
+                };
+                [
+                    rc("motorway")?,
+                    rc("trunk")?,
+                    rc("primary")?,
+                    rc("secondary")?,
+                    rc("tertiary")?,
+                    rc("minor")?,
+                ]
+            },
+            city_color: col(sub("map", "city_color"), "map.city_color")?.unwrap_or(theme.fg),
+            warnings: sub("map", "warnings").bool().unwrap_or(true),
+        };
+        let layout = Layout {
+            mode: match sub("layout", "mode").str().unwrap_or("spiral") {
+                "dwindle" => LayoutMode::Dwindle,
+                "columns" => LayoutMode::Columns,
+                "grid" => LayoutMode::Grid,
+                "spiral" | "fibonacci" => LayoutMode::Spiral,
+                m => {
+                    return Err(format!(
+                        "layout.mode: unknown {m:?} (spiral, dwindle, columns, grid)"
+                    ));
+                }
+            },
+            ratio: sub("layout", "ratio").num().unwrap_or(0.5).clamp(0.2, 0.8) as f32,
+            gap: sub("layout", "gap").num().unwrap_or(8.0).clamp(0.0, 40.0) as f32,
+        };
+        let radio = RadioCfg {
+            enabled: sub("radio", "enabled").bool().unwrap_or(true),
+            volume: sub("radio", "volume").num().unwrap_or(0.8).clamp(0.0, 1.0) as f32,
         };
 
         let mut palettes = Vec::new();
@@ -338,7 +460,11 @@ impl Config {
             let mut stops = Vec::new();
             for (i, s) in p.arr().iter().enumerate() {
                 let what = format!("palettes.{}[{}]", m.key(), i + 1);
-                let v = s.arr().first().and_then(L::num).ok_or_else(|| format!("{what}: expected {{ value, \"#colour\" }}"))?;
+                let v = s
+                    .arr()
+                    .first()
+                    .and_then(L::num)
+                    .ok_or_else(|| format!("{what}: expected {{ value, \"#colour\" }}"))?;
                 let c = need(s.arr().get(1).unwrap_or(&L::Nil), &what)?;
                 stops.push((v as f32, c));
             }
@@ -351,7 +477,8 @@ impl Config {
                 Palette {
                     stops,
                     step: p.get("step").bool().unwrap_or(false),
-                    range_folded: col(p.get("range_folded"), "range_folded")?.unwrap_or(Color32::from_rgb(0x5b, 0x3a, 0x8a)),
+                    range_folded: col(p.get("range_folded"), "range_folded")?
+                        .unwrap_or(Color32::from_rgb(0x5b, 0x3a, 0x8a)),
                     mask_ref: p.get("mask_ref").num().map(|v| v as f32),
                 },
             ));
@@ -359,11 +486,19 @@ impl Config {
 
         let a = |k: &str| sub("alerts", k);
         let mut rules = Vec::new();
-        let rule_list = if r.get("alerts").get("rules").is_nil() { d.get("alerts").get("rules") } else { r.get("alerts").get("rules") };
+        let rule_list = if r.get("alerts").get("rules").is_nil() {
+            d.get("alerts").get("rules")
+        } else {
+            r.get("alerts").get("rules")
+        };
         for (i, x) in rule_list.arr().iter().enumerate() {
             let what = format!("alerts.rules[{}]", i + 1);
             rules.push(AlertRule {
-                event: x.get("event").str().ok_or_else(|| format!("{what}: needs event = \"...\""))?.to_string(),
+                event: x
+                    .get("event")
+                    .str()
+                    .ok_or_else(|| format!("{what}: needs event = \"...\""))?
+                    .to_string(),
                 tornado: x.get("tornado").str().map(str::to_lowercase),
                 damage: x.get("damage").str().map(str::to_lowercase),
                 hail: x.get("hail").num().map(|v| v as f32),
@@ -386,9 +521,13 @@ impl Config {
             .arr()
             .iter()
             .filter_map(|p| p.str())
-            .map(|s| Moment::from_key(s).ok_or_else(|| format!("panes: unknown product {s:?} (try REF, VEL, CC, ZDR, SW, PHI)")))
+            .map(|s| {
+                Moment::from_key(s).ok_or_else(|| {
+                    format!("panes: unknown product {s:?} (try REF, VEL, CC, ZDR, SW, PHI)")
+                })
+            })
             .collect::<Result<_, _>>()?;
-        if panes.is_empty() || panes.len() > 6 {
+        if panes.is_empty() || panes.len() > MAX_PANES {
             return Err("panes: give between 1 and 6 products".into());
         }
 
@@ -416,9 +555,14 @@ impl Config {
             },
             panes,
             smooth: pick("smooth").bool().unwrap_or(false),
-            image_size: pick("image_size").num().unwrap_or(2048.0).clamp(256.0, 4096.0) as usize,
+            image_size: pick("image_size")
+                .num()
+                .unwrap_or(2048.0)
+                .clamp(256.0, 4096.0) as usize,
             theme,
             map,
+            layout,
+            radio,
             palettes,
             alerts,
             bookmarks,

@@ -17,7 +17,14 @@ pub enum Moment {
 }
 
 impl Moment {
-    pub const ALL: [Moment; 6] = [Moment::Ref, Moment::Vel, Moment::Rho, Moment::Zdr, Moment::Sw, Moment::Phi];
+    pub const ALL: [Moment; 6] = [
+        Moment::Ref,
+        Moment::Vel,
+        Moment::Rho,
+        Moment::Zdr,
+        Moment::Sw,
+        Moment::Phi,
+    ];
 
     fn from_name(name: &[u8]) -> Option<Self> {
         Some(match name {
@@ -44,12 +51,15 @@ impl Moment {
     }
 
     pub fn from_key(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|m| m.key().eq_ignore_ascii_case(s)).or(match s.to_ascii_uppercase().as_str() {
-            "RHO" => Some(Moment::Rho),
-            "BR" | "DBZ" => Some(Moment::Ref),
-            "BV" => Some(Moment::Vel),
-            _ => None,
-        })
+        Self::ALL
+            .into_iter()
+            .find(|m| m.key().eq_ignore_ascii_case(s))
+            .or(match s.to_ascii_uppercase().as_str() {
+                "RHO" => Some(Moment::Rho),
+                "BR" | "DBZ" => Some(Moment::Ref),
+                "BV" => Some(Moment::Vel),
+                _ => None,
+            })
     }
 
     pub fn title(self) -> &'static str {
@@ -80,7 +90,11 @@ pub struct Gates {
 
 impl Gates {
     pub fn len(&self) -> usize {
-        if self.word16 { self.data.len() / 2 } else { self.data.len() }
+        if self.word16 {
+            self.data.len() / 2
+        } else {
+            self.data.len()
+        }
     }
 
     pub fn raw(&self, i: usize) -> u16 {
@@ -151,7 +165,11 @@ pub struct Volume {
 impl Volume {
     /// Distinct elevation angles (rounded to 0.1°), lowest first.
     pub fn tilts(&self) -> Vec<f32> {
-        let mut t: Vec<f32> = self.sweeps.iter().map(|s| (s.elevation * 10.0).round() / 10.0).collect();
+        let mut t: Vec<f32> = self
+            .sweeps
+            .iter()
+            .map(|s| (s.elevation * 10.0).round() / 10.0)
+            .collect();
         t.sort_by(|a, b| a.partial_cmp(b).unwrap());
         t.dedup();
         t
@@ -162,10 +180,12 @@ impl Volume {
     pub fn sweep_for(&self, m: Moment, tilt: f32) -> Option<&Sweep> {
         let near = |s: &&Sweep| (s.elevation - tilt).abs() < 0.25 && s.has(m);
         self.sweeps.iter().find(near).or_else(|| {
-            self.sweeps
-                .iter()
-                .filter(|s| s.has(m))
-                .min_by(|a, b| (a.elevation - tilt).abs().partial_cmp(&(b.elevation - tilt).abs()).unwrap())
+            self.sweeps.iter().filter(|s| s.has(m)).min_by(|a, b| {
+                (a.elevation - tilt)
+                    .abs()
+                    .partial_cmp(&(b.elevation - tilt).abs())
+                    .unwrap()
+            })
         })
     }
 }
@@ -185,7 +205,9 @@ pub fn parse(bytes: &[u8]) -> Result<Volume, String> {
     let unzipped;
     let bytes = if bytes.starts_with(&[0x1f, 0x8b]) {
         let mut out = Vec::new();
-        flate2::read::MultiGzDecoder::new(bytes).read_to_end(&mut out).map_err(|e| format!("gunzip: {e}"))?;
+        flate2::read::MultiGzDecoder::new(bytes)
+            .read_to_end(&mut out)
+            .map_err(|e| format!("gunzip: {e}"))?;
         unzipped = out;
         &unzipped[..]
     } else {
@@ -222,7 +244,14 @@ pub fn parse(bytes: &[u8]) -> Result<Volume, String> {
         buf.extend_from_slice(&bytes[24..]);
     }
 
-    let mut vol = Volume { site, lat: 0.0, lon: 0.0, vcp: 0, time: (julian - 1) * 86400 + ms / 1000, sweeps: Vec::new() };
+    let mut vol = Volume {
+        site,
+        lat: 0.0,
+        lon: 0.0,
+        vcp: 0,
+        time: (julian - 1) * 86400 + ms / 1000,
+        sweeps: Vec::new(),
+    };
 
     let mut off = 0;
     while off + 28 <= buf.len() {
@@ -238,7 +267,11 @@ pub fn parse(bytes: &[u8]) -> Result<Volume, String> {
                 }
                 match vol.sweeps.last_mut() {
                     Some(s) if s.number == number => s.radials.push(radial),
-                    _ => vol.sweeps.push(Sweep { number, elevation: radial.elevation, radials: vec![radial] }),
+                    _ => vol.sweeps.push(Sweep {
+                        number,
+                        elevation: radial.elevation,
+                        radials: vec![radial],
+                    }),
                 }
             }
             off = h + len;
@@ -250,7 +283,8 @@ pub fn parse(bytes: &[u8]) -> Result<Volume, String> {
     for s in &mut vol.sweeps {
         let n = s.radials.len() as f32;
         s.elevation = s.radials.iter().map(|r| r.elevation).sum::<f32>() / n;
-        s.radials.sort_by(|a, b| a.azimuth.partial_cmp(&b.azimuth).unwrap());
+        s.radials
+            .sort_by(|a, b| a.azimuth.partial_cmp(&b.azimuth).unwrap());
     }
     vol.sweeps.retain(|s| s.radials.len() > 100);
     if vol.sweeps.is_empty() {
@@ -272,7 +306,12 @@ fn parse_m31(b: &[u8], vol: &mut Volume) -> Option<(Radial, u8, String)> {
     let number = b[22];
     let elevation = bef32(b, 24);
     let count = (be16(b, 30) as usize).min(10);
-    let mut radial = Radial { azimuth, spacing, elevation, moments: Default::default() };
+    let mut radial = Radial {
+        azimuth,
+        spacing,
+        elevation,
+        moments: Default::default(),
+    };
     for i in 0..count {
         let p = be32(b, 32 + 4 * i) as usize;
         if p + 28 > b.len() {
@@ -288,7 +327,9 @@ fn parse_m31(b: &[u8], vol: &mut Volume) -> Option<(Radial, u8, String)> {
                 }
             }
             (b'D', name) => {
-                let Some(m) = Moment::from_name(name) else { continue };
+                let Some(m) = Moment::from_name(name) else {
+                    continue;
+                };
                 let ngates = be16(blk, 8) as usize;
                 let word16 = blk[19] == 16;
                 let nbytes = ngates * if word16 { 2 } else { 1 };

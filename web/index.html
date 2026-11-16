@@ -50,8 +50,8 @@
     <header class="demo-head">
       <h1>weather_shark <span class="muted" style="font-weight:400">live demo</span></h1>
       <p class="muted">
-        A radar viewer for tracking tornadoes, written in Rust with egui. It shows reflectivity, velocity and
-        correlation coefficient side by side from real NEXRAD Level II data. This is the real app, compiled to WebAssembly.
+        A radar viewer for tracking tornadoes, written in Rust with egui. It shows real NEXRAD Level II data on a chase map
+        with roads and towns, and can stream NOAA Weather Radio. This is the real app, compiled to WebAssembly.
       </p>
     </header>
 
@@ -60,7 +60,7 @@
       <a class="btn" href="#KTLX 2013-05-20 20:08" data-start="KTLX 2013-05-20 20:08">Moore 2013</a>
       <a class="btn" href="#KTLX 2013-05-31 23:10" data-start="KTLX 2013-05-31 23:10">El Reno 2013</a>
       <a class="btn" href="#KPAH 2021-12-11 03:30" data-start="KPAH 2021-12-11 03:30">Mayfield 2021</a>
-      <span class="muted">Drag to pan, scroll to zoom, click a purple dot to switch radar. Edit the Lua config with the <code>lua</code> button.</span>
+      <span class="muted">Drag to pan, scroll to zoom, click a purple dot to switch radar. <kbd>n</kbd> splits in another pane (try velocity next to reflectivity), <code>radio</code> plays the nearest NOAA Weather Radio stream.</span>
     </div>
 
     <div class="app">
@@ -72,7 +72,8 @@
       <h2>How it works</h2>
       <ul class="notes">
         <li>Radar volumes come straight from NOAA's public NEXRAD archive on AWS. A small decoder in Rust unpacks the bzip2 records and reads the Level II message 31 radials.</li>
-        <li>Each sweep is drawn to a texture once, then panned and zoomed on the GPU. All panes share one view and one crosshair, so a velocity couplet lines up with the hook echo and any debris signature in CC.</li>
+        <li>Each sweep is drawn to a texture once, then panned and zoomed on the GPU. Panes split in a fibonacci spiral like a tiling window manager, and all share one view and one crosshair, so a velocity couplet lines up with the hook echo and any debris signature in CC.</li>
+        <li>Roads, highway numbers and towns are OpenStreetMap vector tiles from OpenFreeMap, decoded by a small protobuf reader written for this.</li>
         <li>Settings, colour tables and alert sounds live in a Lua file. It runs in <a href="https://github.com/kyren/piccolo" target="_blank" rel="noopener">piccolo</a>, a Lua VM written in pure Rust, so the same config works on the desktop and here.</li>
         <li>Active NWS warnings are checked every minute. A confirmed tornado sounds a siren, and every rule can be changed in the config. Your browser only allows sound after you click the page once.</li>
       </ul>

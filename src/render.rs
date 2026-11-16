@@ -21,15 +21,31 @@ fn az_table(s: &Sweep) -> Vec<u16> {
 
 /// Max range (km) of a moment in a sweep.
 pub fn range_km(s: &Sweep, m: Moment) -> f32 {
-    s.radials.iter().filter_map(|r| r.get(m)).map(|g| g.max_range_m()).fold(0.0, f32::max) / 1000.0
+    s.radials
+        .iter()
+        .filter_map(|r| r.get(m))
+        .map(|g| g.max_range_m())
+        .fold(0.0, f32::max)
+        / 1000.0
 }
 
 /// Rasterize to a `size`×`size` image spanning ±`range` km.
 /// `factor` converts native units to the palette's units (m/s -> kt etc).
-pub fn rasterize(s: &Sweep, m: Moment, pal: &Palette, factor: f32, size: usize, range: f32) -> ColorImage {
+pub fn rasterize(
+    s: &Sweep,
+    m: Moment,
+    pal: &Palette,
+    factor: f32,
+    size: usize,
+    range: f32,
+) -> ColorImage {
     let table = az_table(s);
     let cos_el = s.elevation.to_radians().cos().max(0.2);
-    let rf = if m == Moment::Vel { pal.range_folded } else { Color32::TRANSPARENT };
+    let rf = if m == Moment::Vel {
+        pal.range_folded
+    } else {
+        Color32::TRANSPARENT
+    };
 
     // Colour lookup per raw byte for each distinct (scale, offset) – almost always one.
     let mut luts: Vec<((u32, u32), Vec<Color32>)> = Vec::new();
@@ -76,10 +92,13 @@ pub fn rasterize(s: &Sweep, m: Moment, pal: &Palette, factor: f32, size: usize, 
             let rad = &s.radials[ri as usize];
             let Some(g) = rad.get(m) else { continue };
             let r_m = r2.sqrt() * 1000.0 / cos_el;
-            if let Some(min) = pal.mask_ref {
-                if rad.get(Moment::Ref).and_then(|z| z.at_range(r_m)).is_none_or(|z| z < min) {
-                    continue;
-                }
+            if let Some(min) = pal.mask_ref
+                && rad
+                    .get(Moment::Ref)
+                    .and_then(|z| z.at_range(r_m))
+                    .is_none_or(|z| z < min)
+            {
+                continue;
             }
             let gi = ((r_m - g.first_m) / g.spacing_m + 0.5) as isize;
             if gi < 0 || gi as usize >= g.len() {
@@ -108,13 +127,19 @@ pub fn sample(s: &Sweep, m: Moment, factor: f32, mask: Option<f32>, x: f32, y: f
         let d = (a - az).abs();
         d.min(360.0 - d)
     };
-    let r = if d(cands[0].azimuth) < d(cands[1].azimuth) { cands[0] } else { cands[1] };
+    let r = if d(cands[0].azimuth) < d(cands[1].azimuth) {
+        cands[0]
+    } else {
+        cands[1]
+    };
     let cos_el = s.elevation.to_radians().cos().max(0.2);
     let r_m = (x * x + y * y).sqrt() * 1000.0 / cos_el;
-    if let Some(min) = mask {
-        if r.get(Moment::Ref).and_then(|z| z.at_range(r_m)).is_none_or(|z| z < min) {
-            return None;
-        }
+    if let Some(min) = mask
+        && r.get(Moment::Ref)
+            .and_then(|z| z.at_range(r_m))
+            .is_none_or(|z| z < min)
+    {
+        return None;
     }
     r.get(m)?.at_range(r_m).map(|v| v * factor)
 }

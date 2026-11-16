@@ -33,11 +33,15 @@ pub fn synth(kind: &str) -> Vec<f32> {
         // EAS-style two-tone attention signal (853 + 960 Hz)
         "alarm" => {
             let len = 2.0;
-            tone(&mut v, len, |t| 0.4 * ((TAU * 853.0 * t).sin() + (TAU * 960.0 * t).sin()) * env(t, len));
+            tone(&mut v, len, |t| {
+                0.4 * ((TAU * 853.0 * t).sin() + (TAU * 960.0 * t).sin()) * env(t, len)
+            });
         }
         "beep" => {
             for _ in 0..3 {
-                tone(&mut v, 0.16, |t| 0.6 * (TAU * 1050.0 * t).sin() * env(t, 0.16));
+                tone(&mut v, 0.16, |t| {
+                    0.6 * (TAU * 1050.0 * t).sin() * env(t, 0.16)
+                });
                 tone(&mut v, 0.09, |_| 0.0);
             }
         }
@@ -45,7 +49,9 @@ pub fn synth(kind: &str) -> Vec<f32> {
             for f0 in [880.0, 659.25] {
                 tone(&mut v, 0.7, |t| {
                     let d = (-t * 5.0).exp();
-                    0.5 * d * ((TAU * f0 * t).sin() + 0.3 * (TAU * 2.0 * f0 * t).sin()) * (t / 0.005).min(1.0)
+                    0.5 * d
+                        * ((TAU * f0 * t).sin() + 0.3 * (TAU * 2.0 * f0 * t).sin())
+                        * (t / 0.005).min(1.0)
                 });
             }
         }
@@ -74,7 +80,10 @@ pub struct Player {
 #[cfg(not(target_arch = "wasm32"))]
 impl Player {
     pub fn new() -> Self {
-        Self { sink: None, failed: false }
+        Self {
+            sink: None,
+            failed: false,
+        }
     }
 
     pub fn unlock(&mut self) {}
@@ -100,9 +109,17 @@ impl Player {
         use std::num::NonZero;
         let Some(sink) = self.sink() else { return };
         if let Some(path) = file {
-            let path = crate::config_path().parent().map(|d| d.join(path)).unwrap_or_else(|| path.into());
-            let decode = |b: &Vec<u8>| rodio::Decoder::new(std::io::Cursor::new(b.clone())).map_err(|e| e.to_string());
-            match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| decode(&b).map(|d| (b, d))) {
+            let path = crate::config_path()
+                .parent()
+                .map(|d| d.join(path))
+                .unwrap_or_else(|| path.into());
+            let decode = |b: &Vec<u8>| {
+                rodio::Decoder::new(std::io::Cursor::new(b.clone())).map_err(|e| e.to_string())
+            };
+            match std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|b| decode(&b).map(|d| (b, d)))
+            {
                 Ok((bytes, first)) => {
                     // Queue the repeats back to back (needs a known length; otherwise play once).
                     let len = first.total_duration();
@@ -124,7 +141,11 @@ impl Player {
         if samples.is_empty() {
             return;
         }
-        let buf = rodio::buffer::SamplesBuffer::new(NonZero::new(1).unwrap(), NonZero::new(RATE).unwrap(), samples);
+        let buf = rodio::buffer::SamplesBuffer::new(
+            NonZero::new(1).unwrap(),
+            NonZero::new(RATE).unwrap(),
+            samples,
+        );
         sink.mixer().add(buf.amplify(volume));
     }
 }

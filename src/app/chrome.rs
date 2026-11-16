@@ -1,0 +1,508 @@
+//! Top bar, side panels (alerts, radio, Lua settings) and the error toast.
+
+use egui::{Color32, FontId, Key, Rect, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
+
+use super::{App, Side, heading};
+use crate::config::{DEFAULT_LUA, MAX_PANES};
+use crate::net;
+
+const ERR: Color32 = Color32::from_rgb(255, 130, 130);
+const LIVE_RED: Color32 = Color32::from_rgb(255, 69, 95);
+
+impl App {
+    fn side_toggle(&mut self, ui: &mut Ui, side: Side, text: RichText, hint: &str) {
+        if ui
+            .selectable_label(self.side == side, text)
+            .on_hover_text(hint)
+            .clicked()
+        {
+            self.side = if self.side == side { Side::None } else { side };
+        }
+    }
+
+    pub(super) fn top_bar(&mut self, ui: &mut Ui, now: f64) {
+        let t = self.cfg.theme.clone();
+        ui.horizontal_centered(|ui| {
+            // logo dot: pulses red while a new alert is fresh
+            let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+            let c = if now < self.alarm_until {
+                let k = (0.5 + 0.5 * (now * 6.0).sin()) as f32;
+                Color32::from_rgb(255, (55.0 * k) as u8, (95.0 * k) as u8)
+            } else {
+                t.accent
+            };
+            ui.painter().circle_filled(r.center(), 4.0, c);
+            ui.label(RichText::new("weather_shark").strong());
+            ui.separator();
+
+            // site picker
+            let site_btn = ui.button(RichText::new(format!("{} ▾", self.site)).color(t.accent));
+            egui::Popup::menu(&site_btn).show(|ui| {
+                ui.set_min_width(260.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.site_search).hint_text("search sites…"),
+                );
+                let q = self.site_search.to_lowercase();
+                let mut pick = None;
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for s in &self.sites {
+                            if (q.is_empty()
+                                || s.id.to_lowercase().contains(&q)
+                                || s.name.to_lowercase().contains(&q))
+                                && ui
+                                    .selectable_label(
+                                        s.id == self.site,
+                                        format!("{}  {}", s.id, s.name),
+                                    )
+                                    .clicked()
+                            {
+                                pick = Some(s.id.clone());
+                            }
+                        }
+                    });
+                if let Some(p) = pick {
+                    self.live = true;
+                    self.select_site(&p, None);
+                    ui.close();
+                }
+            });
+
+            // scan time
+            match &self.scan {
+                Some(s) => {
+                    let age = net::now() - s.vol.time;
+                    ui.label(net::fmt_time(s.vol.time));
+                    let tag = if age < 172_800 {
+                        net::fmt_age(age)
+                    } else {
+                        "archive".into()
+                    };
+                    ui.label(RichText::new(tag).color(t.muted));
+                }
+                None => {
+                    ui.label(RichText::new("no scan").color(t.muted));
+                }
+            }
+            if self.loading.is_some() || (self.scan.is_none() && self.error.is_none()) {
+                ui.spinner();
+            }
+            if ui.button("◀").on_hover_text("previous scan (←)").clicked() {
+                self.step(-1);
+            }
+            if ui.button("▶").on_hover_text("next scan (→)").clicked() {
+                self.step(1);
+            }
+            let live = RichText::new("● live").color(if self.live { LIVE_RED } else { t.muted });
+            if ui
+                .selectable_label(self.live, live)
+                .on_hover_text("follow the newest scan (L)")
+                .clicked()
+            {
+                if self.live {
+                    self.live = false;
+                } else {
+                    self.go_live();
+                }
+            }
+            ui.separator();
+
+            // tilt
+            let tilts = self.tilts();
+            egui::ComboBox::from_id_salt("tilt")
+                .selected_text(format!("{:.1}°", self.tilt))
+                .width(64.0)
+                .show_ui(ui, |ui| {
+                    for tl in &tilts {
+                        ui.selectable_value(&mut self.tilt, *tl, format!("{tl:.1}°"));
+                    }
+                })
+                .response
+                .on_hover_text("tilt (↑/↓)");
+
+            let can_add = self.panes.len() < MAX_PANES;
+            if ui
+                .add_enabled(can_add, egui::Button::new("+ pane"))
+                .on_hover_text("split another pane (n)")
+                .clicked()
+            {
+                self.add_pane();
+            }
+            ui.separator();
+
+            self.map_menu(ui);
+            self.events_menu(ui);
+
+            let n = self.alerts.len();
+            let warn_col = self
+                .alerts
+                .first()
+                .map(|(_, r)| self.cfg.alerts.rules[*r].color)
+                .unwrap_or(t.muted);
+            let txt = RichText::new(format!("alerts {n}")).color(if n > 0 {
+                warn_col.to_opaque()
+            } else {
+                t.fg
+            });
+            self.side_toggle(
+                ui,
+                Side::Alerts,
+                txt,
+                "active warnings and watches near this radar",
+            );
+
+            if self.cfg.radio.enabled {
+                let txt = match &self.playing {
+                    Some(call) => RichText::new(format!("● {call}")).color(LIVE_RED),
+                    None => RichText::new("radio"),
+                };
+                self.side_toggle(ui, Side::Radio, txt, "NOAA Weather Radio");
+            }
+            self.side_toggle(ui, Side::Settings, RichText::new("lua"), "edit config.lua");
+        });
+    }
+
+    fn map_menu(&mut self, ui: &mut Ui) {
+        let btn = ui.button("map");
+        egui::Popup::menu(&btn)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(200.0);
+                let muted = self.cfg.theme.muted;
+                heading(ui, "LAYERS", muted);
+                ui.checkbox(&mut self.show.roads, "roads  (m)");
+                ui.add_enabled(
+                    self.show.roads,
+                    egui::Checkbox::new(&mut self.show.road_labels, "highway numbers"),
+                );
+                ui.checkbox(&mut self.show.cities, "cities & towns  (c)");
+                ui.checkbox(&mut self.show.counties, "counties");
+                ui.checkbox(&mut self.show.rings, "range rings");
+                ui.checkbox(&mut self.show.sites, "radar sites");
+                ui.checkbox(&mut self.show.warnings, "warnings & watches");
+                if let Some(e) = &self.tiles.error {
+                    ui.colored_label(ERR, e);
+                } else if self.tiles.failed_count() > 0 {
+                    ui.label(
+                        RichText::new(format!("{} map tiles failed", self.tiles.failed_count()))
+                            .color(muted)
+                            .small(),
+                    );
+                }
+            });
+    }
+
+    fn events_menu(&mut self, ui: &mut Ui) {
+        let t = self.cfg.theme.clone();
+        let bm = ui.button("events");
+        egui::Popup::menu(&bm).show(|ui| {
+            ui.set_min_width(280.0);
+            heading(ui, "BOOKMARKS", t.muted);
+            let mut go = None;
+            for b in &self.cfg.bookmarks {
+                if ui
+                    .button(format!("{:<14} {} {}", b.name, b.site, b.time))
+                    .clicked()
+                {
+                    go = Some((b.site.clone(), b.time.clone()));
+                }
+            }
+            ui.separator();
+            ui.label(
+                RichText::new("go to  SITE YYYY-MM-DD HH:MM (UTC)")
+                    .color(t.muted)
+                    .small(),
+            );
+            let r = ui
+                .add(egui::TextEdit::singleline(&mut self.jump).hint_text("KTLX 2013-05-20 20:08"));
+            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                let s = self.jump.trim().to_string();
+                let (site, time) = s.split_once(' ').unwrap_or((&s, ""));
+                go = Some((site.to_uppercase(), time.to_string()));
+            }
+            if let Some((site, time)) = go {
+                match net::parse_time(&time) {
+                    Some(t) => self.select_site(&site, Some(t + 60)),
+                    None => self.error = Some(format!("can't read time {time:?}")),
+                }
+                ui.close();
+            }
+        });
+    }
+
+    pub(super) fn settings_panel(&mut self, ui: &mut Ui) {
+        let t = self.cfg.theme.clone();
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("config.lua").strong());
+            #[cfg(not(target_arch = "wasm32"))]
+            ui.label(
+                RichText::new(crate::config_path().display().to_string())
+                    .color(t.muted)
+                    .small(),
+            );
+        });
+        ui.horizontal(|ui| {
+            if ui.button("apply").on_hover_text("ctrl+s").clicked() {
+                self.save_editor(ui.ctx());
+            }
+            if ui.button("reset to default").clicked() {
+                self.editor = DEFAULT_LUA.to_string();
+                self.editor_dirty = true;
+            }
+            ui.label(RichText::new("test:").color(t.muted));
+            for s in ["siren", "alarm", "beep", "chime"] {
+                if ui.small_button(s).clicked() {
+                    self.player.play(s, None, 1, self.cfg.alerts.volume);
+                }
+            }
+        });
+        match &self.cfg_error {
+            Some(e) => ui.colored_label(ERR, e),
+            None => ui.label(
+                RichText::new(if self.editor_dirty {
+                    "unsaved changes"
+                } else {
+                    "ok"
+                })
+                .color(t.muted)
+                .small(),
+            ),
+        };
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let r = ui.add(
+                egui::TextEdit::multiline(&mut self.editor)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(40)
+                    .lock_focus(true),
+            );
+            if r.changed() {
+                self.editor_dirty = true;
+            }
+        });
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::S)) {
+            self.save_editor(ui.ctx());
+        }
+    }
+
+    pub(super) fn alerts_panel(&mut self, ui: &mut Ui) {
+        let t = self.cfg.theme.clone();
+        heading(ui, "ACTIVE WARNINGS & WATCHES", t.muted);
+        if let Some(e) = &self.alerts_error {
+            ui.colored_label(ERR, e);
+        }
+        if self.alerts.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "nothing within {:.0} km of {}",
+                    self.cfg.alerts.radius_km, self.site
+                ))
+                .color(t.muted),
+            );
+        }
+        let mut focus = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (al, r) in &self.alerts {
+                let col = self.cfg.alerts.rules[*r].color.to_opaque();
+                let resp = egui::Frame::new()
+                    .fill(t.panel)
+                    .stroke(Stroke::new(1.0, t.line))
+                    .corner_radius(8)
+                    .inner_margin(10)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let (b, _) = ui.allocate_exact_size(vec2(4.0, 16.0), Sense::hover());
+                            ui.painter().rect_filled(b, 2, col);
+                            ui.label(RichText::new(&al.event).color(col).strong());
+                            if let Some(tag) = al.tag() {
+                                ui.label(
+                                    RichText::new(tag)
+                                        .small()
+                                        .background_color(col.gamma_multiply(0.25))
+                                        .color(col),
+                                );
+                            }
+                        });
+                        ui.label(RichText::new(&al.area).small());
+                        let mut extra = String::new();
+                        if let Some(h) = al.hail {
+                            extra += &format!("hail {h:.2}\"  ");
+                        }
+                        if let Some(e) = al.expires.get(11..16) {
+                            extra += &format!("until {e} local");
+                        }
+                        ui.label(RichText::new(extra).color(t.muted).small());
+                    })
+                    .response
+                    .interact(Sense::click());
+                if resp.on_hover_text(&al.headline).clicked() {
+                    focus = Some(al.polygons.clone());
+                }
+                ui.add_space(4.0);
+            }
+        });
+        if let Some(polys) = focus {
+            let pts: Vec<egui::Pos2> = polys
+                .iter()
+                .flatten()
+                .map(|&(x, y)| self.map.proj.fwd(x, y))
+                .collect();
+            if !pts.is_empty() {
+                let r = Rect::from_points(&pts);
+                self.center = r.center().to_vec2();
+                self.zoom = self.zoom.max(3.0);
+            }
+        }
+    }
+
+    pub(super) fn radio_panel(&mut self, ui: &mut Ui, now: f64) {
+        let t = self.cfg.theme.clone();
+        // Refresh the stream list when the panel is open (it changes as feeds come and go).
+        if now - self.radio_requested > 600.0 {
+            self.radio_requested = now;
+            self.net.radio_list();
+        }
+        heading(ui, "NOAA WEATHER RADIO", t.muted);
+
+        if let Some(call) = self.playing.clone() {
+            let st = self.stations.iter().find(|s| s.call == call).cloned();
+            egui::Frame::new()
+                .fill(t.panel)
+                .stroke(Stroke::new(1.0, t.line))
+                .corner_radius(8)
+                .inner_margin(10)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("● {call}")).color(LIVE_RED).strong());
+                        if let Some(s) = &st {
+                            ui.label(format!("{}, {}", s.site, s.state));
+                        }
+                    });
+                    if let Some(s) = &st {
+                        ui.label(
+                            RichText::new(format!("{} MHz · {}", s.freq, self.radio.status()))
+                                .color(t.muted)
+                                .small(),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("■ stop").clicked() {
+                            self.stop_radio();
+                        }
+                        let mut v = self.cfg.radio.volume;
+                        if ui
+                            .add(egui::Slider::new(&mut v, 0.0..=1.0).show_value(false))
+                            .changed()
+                        {
+                            self.cfg.radio.volume = v;
+                            self.radio.set_volume(v);
+                        }
+                    });
+                });
+            ui.add_space(6.0);
+        }
+
+        if let Some(e) = &self.radio_error {
+            ui.colored_label(ERR, e);
+        }
+        if self.stations.is_empty() && self.radio_error.is_none() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("loading stations…").color(t.muted));
+            });
+        }
+        ui.add(
+            egui::TextEdit::singleline(&mut self.radio_search).hint_text("search all stations…"),
+        );
+        let q = self.radio_search.to_lowercase();
+        let mut play = None;
+        egui::ScrollArea::vertical()
+            .max_height(ui.available_height() - 70.0)
+            .show(ui, |ui| {
+                let list = self.stations_by_distance();
+                let shown = list.iter().filter(|(d, s)| {
+                    if q.is_empty() {
+                        *d < 600.0
+                    } else {
+                        s.call.to_lowercase().contains(&q)
+                            || s.site.to_lowercase().contains(&q)
+                            || s.state.to_lowercase() == q
+                    }
+                });
+                let mut any = false;
+                for (d, s) in shown.take(40) {
+                    any = true;
+                    let on = self.playing.as_deref() == Some(s.call.as_str());
+                    let resp = ui
+                        .horizontal(|ui| {
+                            ui.set_width(ui.available_width());
+                            let lbl = format!("{:<7} {}, {}", s.call, s.site, s.state);
+                            let r = ui.selectable_label(on, lbl);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(format!("{d:.0} km")).color(t.muted).small(),
+                                    );
+                                },
+                            );
+                            r
+                        })
+                        .inner;
+                    if resp.on_hover_text(format!("{} MHz", s.freq)).clicked() {
+                        play = Some((*s).clone());
+                    }
+                }
+                if !any && !self.stations.is_empty() {
+                    ui.label(
+                        RichText::new("no streams near this radar. search by state, e.g. ok")
+                            .color(t.muted),
+                    );
+                }
+            });
+        if let Some(s) = play {
+            if self.playing.as_deref() == Some(s.call.as_str()) {
+                self.stop_radio();
+            } else {
+                self.play_radio(ui.ctx(), &s);
+            }
+        }
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("streams by wxradio.org volunteers. They can lag 30 s or more: use a real NWR receiver for warnings.")
+                .color(t.muted)
+                .small(),
+        );
+    }
+
+    /// Errors float over the bottom-right of the map.
+    pub(super) fn error_toast(&self, ui: &Ui, area: Rect) {
+        let Some(e) = self.cfg_error.as_ref().or(self.error.as_ref()) else {
+            return;
+        };
+        let t = &self.cfg.theme;
+        let font = FontId::monospace(t.font_size * 0.9);
+        let galley = ui
+            .painter()
+            .layout(e.clone(), font, ERR, (area.width() * 0.6).max(200.0));
+        let r = Rect::from_min_size(
+            area.right_bottom() - galley.size() - vec2(28.0, 44.0),
+            galley.size(),
+        )
+        .expand(8.0);
+        let p = ui.painter();
+        p.rect_filled(r, 8, t.panel);
+        p.rect_stroke(
+            r,
+            8,
+            Stroke::new(1.0, Color32::from_rgb(160, 60, 70)),
+            StrokeKind::Inside,
+        );
+        p.galley(r.min + vec2(8.0, 8.0), galley, t.fg);
+    }
+}

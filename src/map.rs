@@ -29,16 +29,17 @@ pub fn sites() -> Vec<Site> {
         .collect()
 }
 
-/// Polylines in degrees (lon, lat). See the asset format in README.
-fn decode(b: &[u8]) -> Vec<Vec<(f64, f64)>> {
+/// (FIPS id, polyline in degrees (lon, lat)). Format: see tools/geo.py.
+fn decode(b: &[u8]) -> Vec<(u32, Vec<(f64, f64)>)> {
     let mut out = Vec::new();
     let mut o = 0;
     let i16_at = |o: usize| i16::from_le_bytes([b[o], b[o + 1]]) as i32;
     let i32_at = |o: usize| i32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
-    while o + 10 <= b.len() {
-        let n = u16::from_le_bytes([b[o], b[o + 1]]) as usize;
-        let (mut x, mut y) = (i32_at(o + 2), i32_at(o + 6));
-        o += 10;
+    while o + 14 <= b.len() {
+        let id = i32_at(o) as u32;
+        let n = u16::from_le_bytes([b[o + 4], b[o + 5]]) as usize;
+        let (mut x, mut y) = (i32_at(o + 6), i32_at(o + 10));
+        o += 14;
         let mut line = Vec::with_capacity(n);
         line.push((x as f64 * 1e-4, y as f64 * 1e-4));
         for _ in 1..n {
@@ -47,7 +48,7 @@ fn decode(b: &[u8]) -> Vec<Vec<(f64, f64)>> {
             o += 4;
             line.push((x as f64 * 1e-4, y as f64 * 1e-4));
         }
-        out.push(line);
+        out.push((id, line));
     }
     out
 }
@@ -64,10 +65,23 @@ const KY: f64 = 110.574;
 
 impl Proj {
     pub fn new(lat0: f64, lon0: f64) -> Self {
-        Self { lat0, lon0, kx: 111.320 * lat0.to_radians().cos() }
+        Self {
+            lat0,
+            lon0,
+            kx: 111.320 * lat0.to_radians().cos(),
+        }
     }
     pub fn fwd(&self, lon: f64, lat: f64) -> Pos2 {
-        pos2(((lon - self.lon0) * self.kx) as f32, ((lat - self.lat0) * KY) as f32)
+        pos2(
+            ((lon - self.lon0) * self.kx) as f32,
+            ((lat - self.lat0) * KY) as f32,
+        )
+    }
+    pub fn inv(&self, p: Pos2) -> (f64, f64) {
+        (
+            self.lon0 + p.x as f64 / self.kx,
+            self.lat0 + p.y as f64 / KY,
+        )
     }
 }
 
@@ -77,11 +91,11 @@ pub struct Layer {
 }
 
 impl Layer {
-    fn project(src: &[Vec<(f64, f64)>], p: &Proj) -> Self {
+    fn project(src: &[(u32, Vec<(f64, f64)>)], p: &Proj) -> Self {
         Self {
             lines: src
                 .iter()
-                .map(|l| {
+                .map(|(_, l)| {
                     let pts: Vec<Pos2> = l.iter().map(|&(x, y)| p.fwd(x, y)).collect();
                     (Rect::from_points(&pts), pts)
                 })
@@ -91,8 +105,8 @@ impl Layer {
 }
 
 pub struct Basemap {
-    states: Vec<Vec<(f64, f64)>>,
-    counties: Vec<Vec<(f64, f64)>>,
+    states: Vec<(u32, Vec<(f64, f64)>)>,
+    counties: Vec<(u32, Vec<(f64, f64)>)>,
     pub proj: Proj,
     pub states_km: Layer,
     pub counties_km: Layer,
@@ -110,6 +124,15 @@ impl Basemap {
             counties,
             proj,
         }
+    }
+
+    /// Outline rings of a county by its 5-digit FIPS code.
+    pub fn county(&self, fips: u32) -> Vec<Vec<(f64, f64)>> {
+        self.counties
+            .iter()
+            .filter(|(id, _)| *id == fips)
+            .map(|(_, l)| l.clone())
+            .collect()
     }
 
     pub fn recenter(&mut self, lat0: f64, lon0: f64) {
