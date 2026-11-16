@@ -1,0 +1,37 @@
+[package]
+name = "weather_shark"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bzip2 = "0.6"
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+egui = "0.37"
+ehttp = "0.7"
+flate2 = "1.1.11"
+log = "0.4.35"
+piccolo = "0.3"
+serde_json = "1"
+web-time = "1.1.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rodio = { version = "0.23", default-features = false, features = ["playback", "wav"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+web-sys = { version = "0.3.107", features = ["Window", "Document", "HtmlCanvasElement", "Element", "AudioContext", "AudioBuffer", "AudioBufferSourceNode", "AudioDestinationNode", "AudioNode", "AudioScheduledSourceNode", "GainNode", "AudioParam", "AudioContextState", "BaseAudioContext", "Location"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+
+# the radar decoder and rasterizer are slow unoptimized
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev]
+opt-level = 1

@@ -1,0 +1,178 @@
+//! Alert sounds. They're synthesized in Rust so the same sounds play on
+//! native (rodio) and in the browser (Web Audio).
+
+use std::f32::consts::TAU;
+
+pub const RATE: u32 = 44_100;
+
+fn tone(out: &mut Vec<f32>, secs: f32, mut f: impl FnMut(f32) -> f32) {
+    let n = (secs * RATE as f32) as usize;
+    out.extend((0..n).map(|i| f(i as f32 / RATE as f32)));
+}
+
+/// Short fade in/out so tones don't click.
+fn env(t: f32, len: f32) -> f32 {
+    (t / 0.01).min(1.0) * ((len - t) / 0.02).clamp(0.0, 1.0)
+}
+
+/// One play of a built-in sound, mono at 44.1 kHz.
+pub fn synth(kind: &str) -> Vec<f32> {
+    let mut v = Vec::new();
+    match kind {
+        // rising/falling outdoor warning siren
+        "siren" => {
+            let len = 3.0;
+            let mut phase = 0.0f32;
+            tone(&mut v, len, |t| {
+                let f = 520.0 + 560.0 * (0.5 - 0.5 * (TAU * t / 1.5).cos());
+                phase += TAU * f / RATE as f32;
+                let s = phase.sin() + 0.35 * (2.0 * phase).sin() + 0.15 * (3.0 * phase).sin();
+                0.45 * s * env(t, len)
+            });
+        }
+        // EAS-style two-tone attention signal (853 + 960 Hz)
+        "alarm" => {
+            let len = 2.0;
+            tone(&mut v, len, |t| 0.4 * ((TAU * 853.0 * t).sin() + (TAU * 960.0 * t).sin()) * env(t, len));
+        }
+        "beep" => {
+            for _ in 0..3 {
+                tone(&mut v, 0.16, |t| 0.6 * (TAU * 1050.0 * t).sin() * env(t, 0.16));
+                tone(&mut v, 0.09, |_| 0.0);
+            }
+        }
+        "chime" => {
+            for f0 in [880.0, 659.25] {
+                tone(&mut v, 0.7, |t| {
+                    let d = (-t * 5.0).exp();
+                    0.5 * d * ((TAU * f0 * t).sin() + 0.3 * (TAU * 2.0 * f0 * t).sin()) * (t / 0.005).min(1.0)
+                });
+            }
+        }
+        _ => {}
+    }
+    v
+}
+
+pub fn sequence(kind: &str, repeats: u32) -> Vec<f32> {
+    let one = synth(kind);
+    let gap = vec![0.0; (RATE as f32 * 0.35) as usize];
+    let mut out = Vec::new();
+    for _ in 0..repeats.max(1) {
+        out.extend_from_slice(&one);
+        out.extend_from_slice(&gap);
+    }
+    out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Player {
+    sink: Option<rodio::MixerDeviceSink>,
+    failed: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Player {
+    pub fn new() -> Self {
+        Self { sink: None, failed: false }
+    }
+
+    pub fn unlock(&mut self) {}
+
+    fn sink(&mut self) -> Option<&rodio::MixerDeviceSink> {
+        if self.sink.is_none() && !self.failed {
+            match rodio::DeviceSinkBuilder::open_default_sink() {
+                Ok(mut s) => {
+                    s.log_on_drop(false);
+                    self.sink = Some(s);
+                }
+                Err(e) => {
+                    log::warn!("no audio output: {e}");
+                    self.failed = true;
+                }
+            }
+        }
+        self.sink.as_ref()
+    }
+
+    pub fn play(&mut self, kind: &str, file: Option<&str>, repeats: u32, volume: f32) {
+        use rodio::Source;
+        use std::num::NonZero;
+        let Some(sink) = self.sink() else { return };
+        if let Some(path) = file {
+            let path = crate::config_path().parent().map(|d| d.join(path)).unwrap_or_else(|| path.into());
+            let decode = |b: &Vec<u8>| rodio::Decoder::new(std::io::Cursor::new(b.clone())).map_err(|e| e.to_string());
+            match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| decode(&b).map(|d| (b, d))) {
+                Ok((bytes, first)) => {
+                    // Queue the repeats back to back (needs a known length; otherwise play once).
+                    let len = first.total_duration();
+                    sink.mixer().add(first.amplify(volume));
+                    if let Some(len) = len {
+                        let step = len + std::time::Duration::from_millis(350);
+                        for i in 1..repeats.max(1) {
+                            if let Ok(d) = decode(&bytes) {
+                                sink.mixer().add(d.amplify(volume).delay(step * i));
+                            }
+                        }
+                    }
+                    return;
+                }
+                Err(e) => log::warn!("can't play {}: {e}", path.display()),
+            }
+        }
+        let samples = sequence(kind, repeats);
+        if samples.is_empty() {
+            return;
+        }
+        let buf = rodio::buffer::SamplesBuffer::new(NonZero::new(1).unwrap(), NonZero::new(RATE).unwrap(), samples);
+        sink.mixer().add(buf.amplify(volume));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub struct Player {
+    ctx: Option<web_sys::AudioContext>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Player {
+    pub fn new() -> Self {
+        Self { ctx: None }
+    }
+
+    /// Browsers only allow audio after a user gesture, so this is called on clicks.
+    pub fn unlock(&mut self) {
+        if self.ctx.is_none() {
+            self.ctx = web_sys::AudioContext::new().ok();
+        }
+        if let Some(c) = &self.ctx {
+            if c.state() == web_sys::AudioContextState::Suspended {
+                let _ = c.resume();
+            }
+        }
+    }
+
+    pub fn play(&mut self, kind: &str, _file: Option<&str>, repeats: u32, volume: f32) {
+        self.unlock();
+        let Some(c) = &self.ctx else { return };
+        let mut samples = sequence(kind, repeats);
+        if samples.is_empty() {
+            return;
+        }
+        let mut run = || -> Result<(), wasm_bindgen::JsValue> {
+            let buf = c.create_buffer(1, samples.len() as u32, RATE as f32)?;
+            buf.copy_to_channel(&mut samples, 0)?;
+            let src = c.create_buffer_source()?;
+            src.set_buffer(Some(&buf));
+            let gain = c.create_gain()?;
+            gain.gain().set_value(volume);
+            src.connect_with_audio_node(&gain)?;
+            gain.connect_with_audio_node(&c.destination())?;
+            src.start()?;
+            Ok(())
+        };
+        if let Err(e) = run() {
+            log::warn!("audio: {e:?}");
+        }
+    }
+}
