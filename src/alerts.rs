@@ -1,6 +1,7 @@
 //! NWS active alerts (api.weather.gov) and matching them against the Lua rules.
 
 use crate::config::AlertRule;
+use crate::map::Proj;
 
 #[derive(Clone)]
 pub struct Alert {
@@ -139,4 +140,177 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Alert>, String> {
             })
         })
         .collect())
+}
+
+/// Keep the alerts that have a rule and are near the radar, paired with the index of
+/// the first rule that matches (rules are in priority order). Watches come without a
+/// polygon, so they get the outlines of their counties from `county`.
+pub fn select(
+    list: Vec<Alert>,
+    rules: &[AlertRule],
+    radius_km: f64,
+    proj: &Proj,
+    county: impl Fn(u32) -> Vec<Vec<(f64, f64)>>,
+) -> Vec<(Alert, usize)> {
+    let mut kept: Vec<(Alert, usize)> =
+        list.into_iter()
+            .filter_map(|mut al| {
+                let rule = rules.iter().position(|r| al.matches(r))?;
+                if al.polygons.is_empty() && !al.counties.is_empty() {
+                    al.polygons = al.counties.iter().flat_map(|c| county(*c)).collect();
+                    al.county_based = true;
+                }
+                let near = radius_km <= 0.0
+                    || al.polygons.iter().flatten().any(|&(lon, lat)| {
+                        proj.fwd(lon, lat).to_vec2().length() as f64 <= radius_km
+                    });
+                near.then_some((al, rule))
+            })
+            .collect();
+    kept.sort_by_key(|(_, r)| *r);
+    kept
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::map::{Basemap, Proj};
+
+    /// Trimmed-down api.weather.gov response: one of each kind of alert we care about.
+    const SAMPLE: &str = r#"{ "features": [
+      { "geometry": { "type": "Polygon", "coordinates": [[[-97.55,35.30],[-97.40,35.38],[-97.30,35.33],[-97.45,35.25],[-97.55,35.30]]] },
+        "properties": { "id": "tor-moore", "event": "Tornado Warning", "headline": "Tornado Warning for Cleveland County",
+          "areaDesc": "Cleveland, OK", "expires": "2013-05-20T15:30:00-05:00",
+          "parameters": { "tornadoDetection": ["OBSERVED"], "tornadoDamageThreat": ["CONSIDERABLE"] },
+          "geocode": { "SAME": ["040027"] } } },
+      { "geometry": { "type": "MultiPolygon", "coordinates": [
+            [[[-97.9,35.6],[-97.7,35.7],[-97.6,35.6],[-97.9,35.6]]],
+            [[[-98.2,35.4],[-98.0,35.5],[-97.9,35.4],[-98.2,35.4]]] ] },
+        "properties": { "id": "svr-1", "event": "Severe Thunderstorm Warning", "areaDesc": "Canadian, OK",
+          "parameters": { "maxHailSize": ["2.50"] }, "geocode": { "SAME": ["040017"] } } },
+      { "geometry": null,
+        "properties": { "id": "tow-1", "event": "Tornado Watch", "areaDesc": "Oklahoma; Cleveland, OK",
+          "parameters": {}, "geocode": { "SAME": ["040109", "040027"] } } },
+      { "geometry": { "type": "Polygon", "coordinates": [[[-97.5,35.4],[-97.4,35.45],[-97.35,35.4],[-97.5,35.4]]] },
+        "properties": { "id": "ffw-1", "event": "Flash Flood Warning", "areaDesc": "Oklahoma, OK", "parameters": {} } },
+      { "geometry": { "type": "Polygon", "coordinates": [[[-81.5,28.5],[-81.3,28.6],[-81.2,28.5],[-81.5,28.5]]] },
+        "properties": { "id": "tor-florida", "event": "Tornado Warning", "areaDesc": "Orange, FL",
+          "parameters": { "tornadoDetection": ["RADAR INDICATED"] } } }
+    ]}"#;
+
+    fn ktlx() -> Proj {
+        Proj::new(35.333, -97.278)
+    }
+
+    #[test]
+    fn parses_polygons_and_parameters() {
+        let a = parse(SAMPLE.as_bytes()).unwrap();
+        assert_eq!(a.len(), 5);
+        let tor = &a[0];
+        assert_eq!(tor.polygons.len(), 1);
+        assert_eq!(tor.polygons[0].len(), 5, "ring keeps every vertex");
+        assert_eq!(tor.polygons[0][0], (-97.55, 35.30), "(lon, lat) order");
+        assert!(tor.confirmed());
+        assert_eq!(tor.tag(), Some("PDS"));
+        assert_eq!(tor.counties, vec![40027]);
+        let svr = &a[1];
+        assert_eq!(svr.polygons.len(), 2, "each part of a MultiPolygon is kept");
+        assert_eq!(svr.hail, Some(2.5));
+        let watch = &a[2];
+        assert!(
+            watch.polygons.is_empty(),
+            "watches have no polygon in the API"
+        );
+        assert_eq!(watch.counties, vec![40109, 40027]);
+    }
+
+    #[test]
+    fn rules_pick_the_right_match_and_filter_by_distance() {
+        let cfg = Config::default_config();
+        let map = Basemap::new(35.333, -97.278);
+        let kept = select(
+            parse(SAMPLE.as_bytes()).unwrap(),
+            &cfg.alerts.rules,
+            300.0,
+            &ktlx(),
+            |f| map.county(f),
+        );
+        let ids: Vec<&str> = kept.iter().map(|(a, _)| a.id.as_str()).collect();
+
+        // no rule for flash floods in the default config, and Florida is far from KTLX
+        assert!(!ids.contains(&"ffw-1"));
+        assert!(!ids.contains(&"tor-florida"));
+        // most important first: the confirmed tornado uses the "observed" rule, not the emergency one
+        assert_eq!(ids[0], "tor-moore");
+        let rule = &cfg.alerts.rules[kept[0].1];
+        assert_eq!(rule.tornado.as_deref(), Some("observed"));
+        assert_eq!(rule.sound, "siren");
+        // 2.5" hail takes the hail rule ahead of the plain severe rule
+        let svr = kept.iter().find(|(a, _)| a.id == "svr-1").unwrap();
+        assert_eq!(cfg.alerts.rules[svr.1].hail, Some(2.0));
+    }
+
+    #[test]
+    fn watches_get_county_outlines() {
+        let cfg = Config::default_config();
+        let map = Basemap::new(35.333, -97.278);
+        let kept = select(
+            parse(SAMPLE.as_bytes()).unwrap(),
+            &cfg.alerts.rules,
+            300.0,
+            &ktlx(),
+            |f| map.county(f),
+        );
+        let (watch, _) = kept
+            .iter()
+            .find(|(a, _)| a.id == "tow-1")
+            .expect("watch near KTLX is kept");
+        assert!(watch.county_based);
+        // Oklahoma County + Cleveland County outlines, around Oklahoma City / Norman
+        assert!(watch.polygons.len() >= 2);
+        let (mut lon, mut lat) = (0.0, 0.0);
+        let pts: Vec<_> = watch.polygons.iter().flatten().collect();
+        for (x, y) in &pts {
+            lon += x;
+            lat += y;
+        }
+        let n = pts.len() as f64;
+        assert!(
+            (lon / n + 97.4).abs() < 0.3 && (lat / n - 35.35).abs() < 0.3,
+            "{} {}",
+            lon / n,
+            lat / n
+        );
+    }
+
+    #[test]
+    fn radius_zero_means_everywhere_and_new_rules_add_events() {
+        let lua = r##"return { alerts = { rules = {
+            { event = "Tornado Warning", color = "#ff0000" },
+            { event = "Flash Flood Warning", color = "#00aaff", sound = "none", map = false },
+        } } }"##;
+        let cfg = Config::from_lua(lua).unwrap();
+        let map = Basemap::new(35.333, -97.278);
+        let kept = select(
+            parse(SAMPLE.as_bytes()).unwrap(),
+            &cfg.alerts.rules,
+            0.0,
+            &ktlx(),
+            |f| map.county(f),
+        );
+        let ids: Vec<&str> = kept.iter().map(|(a, _)| a.id.as_str()).collect();
+        assert!(
+            ids.contains(&"tor-florida"),
+            "radius 0 keeps alerts anywhere"
+        );
+        assert!(ids.contains(&"ffw-1"), "adding a rule shows that event");
+        assert!(
+            !ids.contains(&"svr-1") && !ids.contains(&"tow-1"),
+            "events without a rule are hidden"
+        );
+        let ffw = kept.iter().find(|(a, _)| a.id == "ffw-1").unwrap();
+        assert!(!cfg.alerts.rules[ffw.1].map, "map = false is read");
+        assert!(cfg.alerts.rules[ffw.1].list);
+    }
 }

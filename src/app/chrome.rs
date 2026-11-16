@@ -3,7 +3,7 @@
 use egui::{Color32, FontId, Key, Rect, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
 
 use super::{App, Side, heading};
-use crate::config::{DEFAULT_LUA, MAX_PANES};
+use crate::config::{Action, DEFAULT_LUA, MAX_PANES};
 use crate::net;
 
 const ERR: Color32 = Color32::from_rgb(255, 130, 130);
@@ -20,6 +20,17 @@ impl App {
         }
     }
 
+    /// " (N)" for a hover hint, or "" if the action has no key.
+    fn key_hint(&self, a: Action) -> String {
+        self.cfg
+            .keys
+            .iter()
+            .find(|(x, _)| *x == a)
+            .map(|(_, k)| format!(" ({})", k.symbol_or_name()))
+            .unwrap_or_default()
+    }
+
+    /// The top bar shows exactly the items listed in `ui.toolbar`, in that order.
     pub(super) fn top_bar(&mut self, ui: &mut Ui, now: f64) {
         let t = self.cfg.theme.clone();
         ui.horizontal_centered(|ui| {
@@ -33,138 +44,182 @@ impl App {
             };
             ui.painter().circle_filled(r.center(), 4.0, c);
             ui.label(RichText::new("weather_shark").strong());
-            ui.separator();
 
-            // site picker
-            let site_btn = ui.button(RichText::new(format!("{} ▾", self.site)).color(t.accent));
-            egui::Popup::menu(&site_btn).show(|ui| {
-                ui.set_min_width(260.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.site_search).hint_text("search sites…"),
-                );
-                let q = self.site_search.to_lowercase();
-                let mut pick = None;
-                egui::ScrollArea::vertical()
-                    .max_height(320.0)
-                    .show(ui, |ui| {
-                        for s in &self.sites {
-                            if (q.is_empty()
-                                || s.id.to_lowercase().contains(&q)
-                                || s.name.to_lowercase().contains(&q))
-                                && ui
-                                    .selectable_label(
-                                        s.id == self.site,
-                                        format!("{}  {}", s.id, s.name),
-                                    )
-                                    .clicked()
-                            {
-                                pick = Some(s.id.clone());
-                            }
-                        }
-                    });
-                if let Some(p) = pick {
-                    self.live = true;
-                    self.select_site(&p, None);
-                    ui.close();
-                }
-            });
-
-            // scan time
-            match &self.scan {
-                Some(s) => {
-                    let age = net::now() - s.vol.time;
-                    ui.label(net::fmt_time(s.vol.time));
-                    let tag = if age < 172_800 {
-                        net::fmt_age(age)
-                    } else {
-                        "archive".into()
-                    };
-                    ui.label(RichText::new(tag).color(t.muted));
-                }
-                None => {
-                    ui.label(RichText::new("no scan").color(t.muted));
-                }
-            }
-            if self.loading.is_some() || (self.scan.is_none() && self.error.is_none()) {
-                ui.spinner();
-                if let Some(f) = self.load_fraction() {
-                    ui.label(RichText::new(format!("{:.0}%", f * 100.0)).color(t.accent))
-                        .on_hover_text(self.progress_text());
-                }
-            }
-            if ui.button("◀").on_hover_text("previous scan (←)").clicked() {
-                self.step(-1);
-            }
-            if ui.button("▶").on_hover_text("next scan (→)").clicked() {
-                self.step(1);
-            }
-            let live = RichText::new("● live").color(if self.live { LIVE_RED } else { t.muted });
-            if ui
-                .selectable_label(self.live, live)
-                .on_hover_text("follow the newest scan (L)")
-                .clicked()
-            {
-                if self.live {
-                    self.live = false;
+            let items = self.cfg.ui.toolbar.clone();
+            let mut last_group = "";
+            for item in &items {
+                // a thin divider between the radar controls and the panels
+                let group = if matches!(item.as_str(), "site" | "time" | "tilt" | "panes") {
+                    "radar"
                 } else {
-                    self.go_live();
+                    "panels"
+                };
+                if group != last_group {
+                    ui.separator();
+                    last_group = group;
+                }
+                match item.as_str() {
+                    "site" => self.site_picker(ui),
+                    "time" => self.time_controls(ui),
+                    "tilt" => {
+                        let tilts = self.tilts();
+                        egui::ComboBox::from_id_salt("tilt")
+                            .selected_text(format!("{:.1}°", self.tilt))
+                            .width(64.0)
+                            .show_ui(ui, |ui| {
+                                for tl in &tilts {
+                                    ui.selectable_value(&mut self.tilt, *tl, format!("{tl:.1}°"));
+                                }
+                            })
+                            .response
+                            .on_hover_text(format!("tilt{}", self.key_hint(Action::TiltUp)));
+                    }
+                    "panes" => {
+                        let can_add = self.panes.len() < MAX_PANES;
+                        let hint = format!("split another pane{}", self.key_hint(Action::AddPane));
+                        if ui
+                            .add_enabled(can_add, egui::Button::new("+ pane"))
+                            .on_hover_text(hint)
+                            .clicked()
+                        {
+                            self.add_pane();
+                        }
+                    }
+                    "map" => self.map_menu(ui),
+                    "events" => self.events_menu(ui),
+                    "alerts" if self.cfg.alerts.enabled => {
+                        let listed: Vec<_> = self
+                            .alerts
+                            .iter()
+                            .filter(|(_, r)| self.cfg.alerts.rules[*r].list)
+                            .collect();
+                        let n = listed.len();
+                        let warn = listed
+                            .first()
+                            .map(|(_, r)| self.cfg.alerts.rules[*r].color.to_opaque())
+                            .unwrap_or(t.muted);
+                        let txt = RichText::new(format!("alerts {n}")).color(if n > 0 {
+                            warn
+                        } else {
+                            t.fg
+                        });
+                        self.side_toggle(
+                            ui,
+                            Side::Alerts,
+                            txt,
+                            "active warnings and watches near this radar",
+                        );
+                    }
+                    "radio" if self.cfg.radio.enabled => {
+                        let txt = match &self.playing {
+                            Some(call) => RichText::new(format!("● {call}")).color(LIVE_RED),
+                            None => RichText::new("radio"),
+                        };
+                        let hint = format!("NOAA Weather Radio{}", self.key_hint(Action::Radio));
+                        self.side_toggle(ui, Side::Radio, txt, &hint);
+                    }
+                    "lua" => {
+                        let hint = format!("edit config.lua{}", self.key_hint(Action::Settings));
+                        self.side_toggle(ui, Side::Settings, RichText::new("lua"), &hint);
+                    }
+                    _ => {}
                 }
             }
-            ui.separator();
-
-            // tilt
-            let tilts = self.tilts();
-            egui::ComboBox::from_id_salt("tilt")
-                .selected_text(format!("{:.1}°", self.tilt))
-                .width(64.0)
-                .show_ui(ui, |ui| {
-                    for tl in &tilts {
-                        ui.selectable_value(&mut self.tilt, *tl, format!("{tl:.1}°"));
-                    }
-                })
-                .response
-                .on_hover_text("tilt (↑/↓)");
-
-            let can_add = self.panes.len() < MAX_PANES;
-            if ui
-                .add_enabled(can_add, egui::Button::new("+ pane"))
-                .on_hover_text("split another pane (n)")
-                .clicked()
-            {
-                self.add_pane();
-            }
-            ui.separator();
-
-            self.map_menu(ui);
-            self.events_menu(ui);
-
-            let n = self.alerts.len();
-            let warn_col = self
-                .alerts
-                .first()
-                .map(|(_, r)| self.cfg.alerts.rules[*r].color)
-                .unwrap_or(t.muted);
-            let txt = RichText::new(format!("alerts {n}")).color(if n > 0 {
-                warn_col.to_opaque()
-            } else {
-                t.fg
-            });
-            self.side_toggle(
-                ui,
-                Side::Alerts,
-                txt,
-                "active warnings and watches near this radar",
-            );
-
-            if self.cfg.radio.enabled {
-                let txt = match &self.playing {
-                    Some(call) => RichText::new(format!("● {call}")).color(LIVE_RED),
-                    None => RichText::new("radio"),
-                };
-                self.side_toggle(ui, Side::Radio, txt, "NOAA Weather Radio");
-            }
-            self.side_toggle(ui, Side::Settings, RichText::new("lua"), "edit config.lua");
         });
+    }
+
+    fn site_picker(&mut self, ui: &mut Ui) {
+        let t = self.cfg.theme.clone();
+        let site_btn = ui.button(RichText::new(format!("{} ▾", self.site)).color(t.accent));
+        egui::Popup::menu(&site_btn).show(|ui| {
+            ui.set_min_width(260.0);
+            ui.add(egui::TextEdit::singleline(&mut self.site_search).hint_text("search sites…"));
+            let q = self.site_search.to_lowercase();
+            let mut pick = None;
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for s in &self.sites {
+                        if (q.is_empty()
+                            || s.id.to_lowercase().contains(&q)
+                            || s.name.to_lowercase().contains(&q))
+                            && ui
+                                .selectable_label(
+                                    s.id == self.site,
+                                    format!("{}  {}", s.id, s.name),
+                                )
+                                .clicked()
+                        {
+                            pick = Some(s.id.clone());
+                        }
+                    }
+                });
+            if let Some(p) = pick {
+                self.live = true;
+                self.select_site(&p, None);
+                ui.close();
+            }
+        });
+    }
+
+    /// Scan time, loading progress, ◀ ▶ and the live switch.
+    fn time_controls(&mut self, ui: &mut Ui) {
+        let t = self.cfg.theme.clone();
+        match &self.scan {
+            Some(s) => {
+                let age = net::now() - s.vol.time;
+                ui.label(net::fmt_time(s.vol.time));
+                let tag = if s.key.starts_with("file:") {
+                    "file".into()
+                } else if age < 172_800 {
+                    net::fmt_age(age)
+                } else {
+                    "archive".into()
+                };
+                let hover = s.key.strip_prefix("file:").unwrap_or(&s.key).to_string();
+                ui.label(RichText::new(tag).color(t.muted))
+                    .on_hover_text(hover);
+            }
+            None => {
+                ui.label(RichText::new("no scan").color(t.muted));
+            }
+        }
+        if self.loading.is_some() || (self.scan.is_none() && self.error.is_none()) {
+            ui.spinner();
+            if let Some(f) = self.load_fraction() {
+                ui.label(RichText::new(format!("{:.0}%", f * 100.0)).color(t.accent))
+                    .on_hover_text(self.progress_text());
+            }
+        }
+        if ui
+            .button("◀")
+            .on_hover_text(format!("previous scan{}", self.key_hint(Action::PrevScan)))
+            .clicked()
+        {
+            self.step(-1);
+        }
+        if ui
+            .button("▶")
+            .on_hover_text(format!("next scan{}", self.key_hint(Action::NextScan)))
+            .clicked()
+        {
+            self.step(1);
+        }
+        let live = RichText::new("● live").color(if self.live { LIVE_RED } else { t.muted });
+        if ui
+            .selectable_label(self.live, live)
+            .on_hover_text(format!(
+                "follow the newest scan{}",
+                self.key_hint(Action::Live)
+            ))
+            .clicked()
+        {
+            if self.live {
+                self.live = false;
+            } else {
+                self.go_live();
+            }
+        }
     }
 
     fn map_menu(&mut self, ui: &mut Ui) {
@@ -202,7 +257,21 @@ impl App {
         let bm = ui.button("events");
         egui::Popup::menu(&bm).show(|ui| {
             ui.set_min_width(280.0);
-            heading(ui, "BOOKMARKS", t.muted);
+            if ui
+                .button(format!("open file…{}", self.key_hint(Action::Open)))
+                .on_hover_text("a NEXRAD Level II file (or drop one on the window)")
+                .clicked()
+            {
+                if let Err(e) = self.net.pick_file() {
+                    self.error = Some(e);
+                }
+                ui.close();
+            }
+            if self.cfg.bookmarks.is_empty() {
+                ui.separator();
+            } else {
+                heading(ui, "BOOKMARKS", t.muted);
+            }
             let mut go = None;
             for b in &self.cfg.bookmarks {
                 if ui
@@ -241,13 +310,14 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new("config.lua").strong());
             #[cfg(not(target_arch = "wasm32"))]
-            ui.label(
-                RichText::new(crate::config_path().display().to_string())
-                    .color(t.muted)
-                    .small(),
-            );
+            {
+                // long paths are shortened with … (full path on hover) so they can't widen the panel
+                let path = crate::config_path().display().to_string();
+                ui.add(egui::Label::new(RichText::new(&path).color(t.muted).small()).truncate())
+                    .on_hover_text(path);
+            }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("apply").on_hover_text("ctrl+s").clicked() {
                 self.save_editor(ui.ctx());
             }
@@ -275,13 +345,24 @@ impl App {
             ),
         };
         ui.add_space(4.0);
+        let syntax = self.cfg.syntax.clone();
+        let font = FontId::monospace(t.font_size);
+        let fg = t.fg;
+        let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+            let mut job = super::luahl::highlight(buf.as_str(), &syntax, font.clone(), fg);
+            job.wrap.max_width = wrap;
+            ui.painter().layout_job(job)
+        };
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // exactly the panel's width: INFINITY would stretch the whole window's layout
+            let w = ui.available_width();
             let r = ui.add(
                 egui::TextEdit::multiline(&mut self.editor)
                     .code_editor()
-                    .desired_width(f32::INFINITY)
+                    .desired_width(w)
                     .desired_rows(40)
-                    .lock_focus(true),
+                    .lock_focus(true)
+                    .layouter(&mut layouter),
             );
             if r.changed() {
                 self.editor_dirty = true;
@@ -294,7 +375,18 @@ impl App {
 
     pub(super) fn alerts_panel(&mut self, ui: &mut Ui) {
         let t = self.cfg.theme.clone();
-        heading(ui, "ACTIVE WARNINGS & WATCHES", t.muted);
+        ui.add_space(8.0);
+        egui::Sides::new().show(
+            ui,
+            |ui| ui.label(RichText::new("ACTIVE WARNINGS & WATCHES").color(t.muted).small()),
+            |ui| {
+                let hint = "show a fake confirmed tornado warning on the map (and play its sound) to preview your alert rules";
+                if ui.small_button("simulate").on_hover_text(hint).clicked() {
+                    let now = ui.input(|i| i.time);
+                    self.simulate_warning(now);
+                }
+            },
+        );
         if let Some(e) = &self.alerts_error {
             ui.colored_label(ERR, e);
         }
@@ -310,14 +402,19 @@ impl App {
         let mut focus = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (al, r) in &self.alerts {
+                if !self.cfg.alerts.rules[*r].list {
+                    continue;
+                }
                 let col = self.cfg.alerts.rules[*r].color.to_opaque();
+                // card fills the panel minus its own margin + border, so it can't push the panel wider
+                let card_w = ui.available_width() - 22.0;
                 let resp = egui::Frame::new()
                     .fill(t.panel)
                     .stroke(Stroke::new(1.0, t.line))
                     .corner_radius(8)
                     .inner_margin(10)
                     .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
+                        ui.set_width(card_w);
                         ui.horizontal(|ui| {
                             let (b, _) = ui.allocate_exact_size(vec2(4.0, 16.0), Sense::hover());
                             ui.painter().rect_filled(b, 2, col);
@@ -374,13 +471,14 @@ impl App {
 
         if let Some(call) = self.playing.clone() {
             let st = self.stations.iter().find(|s| s.call == call).cloned();
+            let card_w = ui.available_width() - 22.0;
             egui::Frame::new()
                 .fill(t.panel)
                 .stroke(Stroke::new(1.0, t.line))
                 .corner_radius(8)
                 .inner_margin(10)
                 .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                    ui.set_width(card_w);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("● {call}")).color(LIVE_RED).strong());
                         if let Some(s) = &st {
@@ -442,22 +540,12 @@ impl App {
                 for (d, s) in shown.take(40) {
                     any = true;
                     let on = self.playing.as_deref() == Some(s.call.as_str());
-                    let resp = ui
-                        .horizontal(|ui| {
-                            ui.set_width(ui.available_width());
-                            let lbl = format!("{:<7} {}, {}", s.call, s.site, s.state);
-                            let r = ui.selectable_label(on, lbl);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        RichText::new(format!("{d:.0} km")).color(t.muted).small(),
-                                    );
-                                },
-                            );
-                            r
-                        })
-                        .inner;
+                    let lbl = format!("{:<7} {}, {}", s.call, s.site, s.state);
+                    let (resp, _) = egui::Sides::new().show(
+                        ui,
+                        |ui| ui.selectable_label(on, lbl),
+                        |ui| ui.label(RichText::new(format!("{d:.0} km")).color(t.muted).small()),
+                    );
                     if resp.on_hover_text(format!("{} MHz", s.freq)).clicked() {
                         play = Some((*s).clone());
                     }
@@ -486,6 +574,9 @@ impl App {
 
     /// Errors float over the bottom-right of the map.
     pub(super) fn error_toast(&self, ui: &Ui, area: Rect) {
+        if !self.cfg.ui.toasts && self.cfg_error.is_none() {
+            return; // config errors always show: otherwise a typo would fail silently
+        }
         let Some(e) = self.cfg_error.as_ref().or(self.error.as_ref()) else {
             return;
         };

@@ -114,7 +114,7 @@ impl App {
                 painter.circle_stroke(o, r as f32 * self.zoom, Stroke::new(1.0, c));
             }
         }
-        if self.show.warnings {
+        if self.show.warnings && self.cfg.alerts.enabled {
             self.draw_warnings(&painter, rect);
         }
         self.draw_labels(&painter, rect, &tiles);
@@ -172,7 +172,7 @@ impl App {
         let mut readout = None;
         if let Some(h) = self.hover {
             let p = self.to_screen(rect, h);
-            if rect.contains(p) {
+            if rect.contains(p) && self.cfg.ui.crosshair {
                 let c = ms.crosshair;
                 for (a, b) in [
                     (vec2(-9.0, 0.0), vec2(-3.0, 0.0)),
@@ -184,6 +184,7 @@ impl App {
                 }
             }
             if let Some(scan) = &self.scan
+                && self.cfg.ui.readout
                 && let Some(sw) = scan.vol.sweep_for(m, self.tilt)
             {
                 readout = Some(
@@ -251,110 +252,115 @@ impl App {
             }
         }
 
-        // header: a soft band so map lines don't run through the labels
-        let band = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 44.0));
-        painter.rect_filled(
-            band,
-            egui::CornerRadius {
-                nw: t.radius as u8,
-                ne: t.radius as u8,
-                sw: 0,
-                se: 0,
-            },
-            t.panel.gamma_multiply(0.82),
-        );
-
-        // header: product picker, close button, readout
-        let head =
-            Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(rect.width() - 20.0, 24.0));
         let mut close = false;
-        ui.scope_builder(
-            UiBuilder::new()
-                .max_rect(head)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            |ui| {
-                let mut sel = m;
-                egui::ComboBox::from_id_salt(("product", self.panes[idx].id))
-                    .selected_text(egui::RichText::new(m.key()).color(t.accent).strong())
-                    .width(64.0)
-                    .show_ui(ui, |ui| {
-                        for mm in Moment::ALL {
-                            ui.selectable_value(
-                                &mut sel,
-                                mm,
-                                format!("{:<4} {}", mm.key(), mm.title()),
-                            );
+        if self.cfg.ui.header {
+            // header: a soft band so map lines don't run through the labels
+            let band = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 44.0));
+            painter.rect_filled(
+                band,
+                egui::CornerRadius {
+                    nw: t.radius as u8,
+                    ne: t.radius as u8,
+                    sw: 0,
+                    se: 0,
+                },
+                t.panel.gamma_multiply(0.82),
+            );
+
+            // header: product picker, close button, readout
+            let head =
+                Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(rect.width() - 20.0, 24.0));
+            ui.scope_builder(
+                UiBuilder::new()
+                    .max_rect(head)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    let mut sel = m;
+                    egui::ComboBox::from_id_salt(("product", self.panes[idx].id))
+                        .selected_text(egui::RichText::new(m.key()).color(t.accent).strong())
+                        .width(64.0)
+                        .show_ui(ui, |ui| {
+                            for mm in Moment::ALL {
+                                ui.selectable_value(
+                                    &mut sel,
+                                    mm,
+                                    format!("{:<4} {}", mm.key(), mm.title()),
+                                );
+                            }
+                        });
+                    self.panes[idx].moment = sel;
+                    if rect.width() > 360.0 {
+                        let elev = self
+                            .scan
+                            .as_ref()
+                            .and_then(|s| s.vol.sweep_for(m, self.tilt))
+                            .map(|s| s.elevation);
+                        let sub = match elev {
+                            Some(e) => format!("{} · {e:.1}°", m.title()),
+                            None => m.title().to_string(),
+                        };
+                        ui.label(egui::RichText::new(sub).color(t.muted).small());
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.panes.len() > 1
+                            && ui
+                                .small_button("×")
+                                .on_hover_text("close pane (x)")
+                                .clicked()
+                        {
+                            close = true;
+                        }
+                        if let Some(r) = readout {
+                            ui.label(egui::RichText::new(r).color(t.fg));
                         }
                     });
-                self.panes[idx].moment = sel;
-                if rect.width() > 360.0 {
-                    let elev = self
-                        .scan
-                        .as_ref()
-                        .and_then(|s| s.vol.sweep_for(m, self.tilt))
-                        .map(|s| s.elevation);
-                    let sub = match elev {
-                        Some(e) => format!("{} · {e:.1}°", m.title()),
-                        None => m.title().to_string(),
-                    };
-                    ui.label(egui::RichText::new(sub).color(t.muted).small());
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.panes.len() > 1
-                        && ui
-                            .small_button("×")
-                            .on_hover_text("close pane (x)")
-                            .clicked()
-                    {
-                        close = true;
-                    }
-                    if let Some(r) = readout {
-                        ui.label(egui::RichText::new(r).color(t.fg));
-                    }
-                });
-            },
-        );
-
-        // legend + attribution
-        let pal = self.cfg.palette(m);
-        let lw = (rect.width() - 24.0).min(220.0);
-        let lr = Rect::from_min_size(pos2(rect.min.x + 12.0, rect.max.y - 22.0), vec2(lw, 6.0));
-        let (lo, hi) = (pal.min(), pal.max());
-        let plate = Rect::from_min_max(lr.min - vec2(8.0, 18.0), lr.max + vec2(8.0, 7.0));
-        painter.rect_filled(plate, 6, t.panel.gamma_multiply(0.85));
-        let steps = 64;
-        for i in 0..steps {
-            let v = lo + (hi - lo) * (i as f32 + 0.5) / steps as f32;
-            let x0 = lr.min.x + lr.width() * i as f32 / steps as f32;
-            let x1 = lr.min.x + lr.width() * (i + 1) as f32 / steps as f32 + 0.5;
-            painter.rect_filled(
-                Rect::from_x_y_ranges(x0..=x1, lr.y_range()),
-                0,
-                pal.color(v),
+                },
             );
         }
-        let fmt = |v: f32| {
-            if m == Moment::Rho {
-                format!("{v:.2}")
-            } else {
-                format!("{v:.0}")
-            }
-        };
+
+        // legend
         let small = FontId::monospace(10.0);
-        painter.text(
-            lr.left_top() - vec2(0.0, 3.0),
-            Align2::LEFT_BOTTOM,
-            fmt(lo),
-            small.clone(),
-            t.muted,
-        );
-        painter.text(
-            lr.right_top() - vec2(0.0, 3.0),
-            Align2::RIGHT_BOTTOM,
-            format!("{} {}", fmt(hi), self.cfg.unit_label(m)),
-            small.clone(),
-            t.muted,
-        );
+        if self.cfg.ui.legend {
+            let pal = self.cfg.palette(m);
+            let lw = (rect.width() - 24.0).min(220.0);
+            let lr = Rect::from_min_size(pos2(rect.min.x + 12.0, rect.max.y - 22.0), vec2(lw, 6.0));
+            let (lo, hi) = (pal.min(), pal.max());
+            let plate = Rect::from_min_max(lr.min - vec2(8.0, 18.0), lr.max + vec2(8.0, 7.0));
+            painter.rect_filled(plate, 6, t.panel.gamma_multiply(0.85));
+            let steps = 64;
+            for i in 0..steps {
+                let v = lo + (hi - lo) * (i as f32 + 0.5) / steps as f32;
+                let x0 = lr.min.x + lr.width() * i as f32 / steps as f32;
+                let x1 = lr.min.x + lr.width() * (i + 1) as f32 / steps as f32 + 0.5;
+                painter.rect_filled(
+                    Rect::from_x_y_ranges(x0..=x1, lr.y_range()),
+                    0,
+                    pal.color(v),
+                );
+            }
+            let fmt = |v: f32| {
+                if m == Moment::Rho {
+                    format!("{v:.2}")
+                } else {
+                    format!("{v:.0}")
+                }
+            };
+            painter.text(
+                lr.left_top() - vec2(0.0, 3.0),
+                Align2::LEFT_BOTTOM,
+                fmt(lo),
+                small.clone(),
+                t.muted,
+            );
+            painter.text(
+                lr.right_top() - vec2(0.0, 3.0),
+                Align2::RIGHT_BOTTOM,
+                format!("{} {}", fmt(hi), self.cfg.unit_label(m)),
+                small.clone(),
+                t.muted,
+            );
+        }
+
         if (self.show.roads || self.show.cities)
             && self.tiles.template.is_some()
             && rect.width() > 420.0

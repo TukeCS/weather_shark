@@ -23,18 +23,33 @@ mod tiles;
 #[cfg(not(target_arch = "wasm32"))]
 pub fn config_path() -> std::path::PathBuf {
     use std::path::PathBuf;
-    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let env = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
     let home = env("HOME").or_else(|| env("USERPROFILE"));
     let dir = if let Some(x) = env("XDG_CONFIG_HOME") {
         x.join("weather_shark")
     } else if cfg!(target_os = "windows") {
-        env("APPDATA").or_else(|| home.clone().map(|h| h.join("AppData").join("Roaming"))).unwrap_or_else(|| ".".into()).join("weather_shark")
+        env("APPDATA")
+            .or_else(|| home.clone().map(|h| h.join("AppData").join("Roaming")))
+            .unwrap_or_else(|| ".".into())
+            .join("weather_shark")
     } else if cfg!(target_os = "macos") {
         let h = home.unwrap_or_else(|| ".".into());
         let dot = h.join(".config").join("weather_shark");
-        if dot.exists() { dot } else { h.join("Library").join("Application Support").join("weather_shark") }
+        if dot.exists() {
+            dot
+        } else {
+            h.join("Library")
+                .join("Application Support")
+                .join("weather_shark")
+        }
     } else {
-        home.unwrap_or_else(|| ".".into()).join(".config").join("weather_shark")
+        home.unwrap_or_else(|| ".".into())
+            .join(".config")
+            .join("weather_shark")
     };
     dir.join("config.lua")
 }
@@ -138,6 +153,13 @@ fn main() -> eframe::Result {
             let (a, b) = v.split_once(',')?;
             Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
         });
+        let panel = flag(&mut args, "--panel");
+        let simulate = if let Some(i) = args.iter().position(|a| a == "--simulate") {
+            args.remove(i);
+            true
+        } else {
+            false
+        };
         let layout = flag(&mut args, "--layout").map(|l| match l.as_str() {
             "columns" => config::LayoutMode::Columns,
             "grid" => config::LayoutMode::Grid,
@@ -147,7 +169,7 @@ fn main() -> eframe::Result {
         args.remove(0);
         if args.is_empty() {
             eprintln!(
-                "usage: weather_shark screenshot OUT.png [SITE [\"YYYY-MM-DD HH:MM\"]] [--panes REF,VEL] [--view KM] [--layout columns] [--at LAT,LON]"
+                "usage: weather_shark screenshot OUT.png [SITE [\"YYYY-MM-DD HH:MM\"]] [--panes REF,VEL] [--view KM] [--layout columns] [--at LAT,LON] [--panel lua|alerts|radio] [--simulate]"
             );
             std::process::exit(2);
         }
@@ -157,6 +179,8 @@ fn main() -> eframe::Result {
             view_km,
             layout,
             at,
+            panel,
+            simulate,
         });
     }
 
@@ -251,6 +275,45 @@ mod tests {
                 .contains("too long")
         );
         assert!(Config::from_lua("return { theme = { bg = 'red' } }").is_err());
+    }
+
+    #[test]
+    fn toolbar_keys_and_switches() {
+        use crate::config::Action;
+        let c = Config::from_lua(
+            r#"return { ui = { toolbar = { "time", "lua" }, legend = false },
+                        keys = { radio = false, add_pane = "F2", cities = "k" },
+                        radio = { enabled = false } }"#,
+        )
+        .unwrap();
+        assert_eq!(c.ui.toolbar, vec!["time", "lua"]);
+        assert!(
+            !c.ui.legend && c.ui.header,
+            "unset switches keep their default"
+        );
+        assert!(!c.radio.enabled);
+        assert!(
+            !c.keys.iter().any(|(a, _)| *a == Action::Radio),
+            "false unbinds a key"
+        );
+        assert!(c.keys.contains(&(Action::AddPane, egui::Key::F2)));
+        assert!(
+            c.keys.contains(&(Action::Cities, egui::Key::K)),
+            "lower-case letters work"
+        );
+        assert!(
+            c.keys.contains(&(Action::PrevScan, egui::Key::ArrowLeft)),
+            "others keep defaults"
+        );
+
+        let e = Config::from_lua(r#"return { ui = { toolbar = { "site", "nope" } } }"#)
+            .err()
+            .unwrap();
+        assert!(e.contains("nope") && e.contains("tilt"), "{e}");
+        let e = Config::from_lua(r#"return { keys = { live = "NotAKey" } }"#)
+            .err()
+            .unwrap();
+        assert!(e.contains("keys.live"), "{e}");
     }
 
     #[test]

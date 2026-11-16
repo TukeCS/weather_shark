@@ -4,6 +4,7 @@
 
 mod chrome;
 mod layout;
+mod luahl;
 mod mapdraw;
 mod pane;
 
@@ -12,12 +13,12 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 
 use egui::{
-    Color32, CornerRadius, FontFamily, FontId, Key, Pos2, Rect, Stroke, TextureHandle, Ui, Vec2,
-    pos2, vec2,
+    Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, Stroke, TextureHandle, Ui, Vec2, pos2,
+    vec2,
 };
 
 use crate::alerts::Alert;
-use crate::config::{Config, MAX_PANES};
+use crate::config::{Action, Config, MAX_PANES};
 use crate::level2::{Moment, Volume};
 use crate::map::{Basemap, Site, sites};
 use crate::net::{self, Msg, Net};
@@ -84,6 +85,10 @@ pub struct ShotOpts {
     pub layout: Option<crate::config::LayoutMode>,
     /// centre the view on (lat, lon)
     pub at: Option<(f64, f64)>,
+    /// open a side panel: "lua", "alerts" or "radio"
+    pub panel: Option<String>,
+    /// show a simulated tornado warning
+    pub simulate: bool,
 }
 
 pub struct App {
@@ -144,6 +149,8 @@ pub struct App {
     alerts_error: Option<String>,
     last_alerts: f64,
     alarm_until: f64,
+    /// test warnings from the "simulate" button, with their expiry time
+    simulated: Vec<(Alert, f64)>,
     player: Player,
 
     stations: Vec<Station>,
@@ -152,6 +159,8 @@ pub struct App {
     radio: RadioPlayer,
     playing: Option<String>,
     radio_search: String,
+    /// play the nearest station once the list arrives (radio key pressed before it loaded)
+    radio_autoplay: bool,
 
     side: Side,
     site_search: String,
@@ -178,6 +187,9 @@ impl App {
         start: Option<(String, String)>,
         shot: Option<ShotOpts>,
     ) -> Self {
+        // Layout comes from config.lua, not from egui's saved state (an old saved
+        // panel width would otherwise override it on every start).
+        cc.egui_ctx.memory_mut(|m| *m = egui::Memory::default());
         let (tx, rx) = channel();
         let net = Net::new(tx, cc.egui_ctx.clone());
 
@@ -268,6 +280,7 @@ impl App {
             alerts_error: None,
             last_alerts: f64::NEG_INFINITY,
             alarm_until: 0.0,
+            simulated: Vec::new(),
             player: Player::new(),
             stations: Vec::new(),
             radio_error: None,
@@ -275,6 +288,7 @@ impl App {
             radio: RadioPlayer::new(),
             playing: None,
             radio_search: String::new(),
+            radio_autoplay: false,
             side: Side::None,
             site_search: String::new(),
             jump: String::new(),
@@ -282,13 +296,31 @@ impl App {
         };
         app.radio.set_volume(app.cfg.radio.volume);
         app.apply_style(&cc.egui_ctx);
+        // `weather_shark FILE` opens a local radar file instead
+        #[cfg(not(target_arch = "wasm32"))]
+        let start = match start {
+            Some((s, _)) if std::path::Path::new(&s).is_file() => {
+                app.select_site(&site, None);
+                app.live = false;
+                app.net.open_path(s.into());
+                None
+            }
+            other => other,
+        };
         match start.and_then(|(s, t)| Some((s.to_uppercase(), net::parse_time(&t)?))) {
             Some((s, t)) => app.select_site(&s, Some(t + 60)),
-            None => app.select_site(&site, None),
+            None if app.scan.is_none() && app.live => app.select_site(&site, None),
+            None => {}
         }
         if let Some((lat, lon)) = app.shot.as_ref().and_then(|s| s.at) {
             app.center = app.map.proj.fwd(lon, lat).to_vec2();
         }
+        app.side = match app.shot.as_ref().and_then(|s| s.panel.as_deref()) {
+            Some("lua") => Side::Settings,
+            Some("alerts") => Side::Alerts,
+            Some("radio") => Side::Radio,
+            _ => app.side,
+        };
         app
     }
 
@@ -572,6 +604,51 @@ impl App {
         }
     }
 
+    /// Show a radar file the user opened, centred on its radar.
+    fn show_local(&mut self, name: String, vol: Arc<Volume>) {
+        self.live = false;
+        self.target = None;
+        self.loading = None;
+        self.progress = None;
+        self.keys.clear();
+        self.listed.clear();
+        self.error = None;
+        if vol.lat != 0.0 {
+            self.map.recenter(vol.lat, vol.lon);
+        } else if let Some(s) = self.sites.iter().find(|s| s.id == vol.site) {
+            self.map.recenter(s.lat, s.lon);
+        }
+        if vol.site != self.site {
+            self.center = Vec2::ZERO;
+            self.last_alerts = f64::NEG_INFINITY;
+        }
+        self.site = vol.site.clone();
+        log::info!("opened {name} ({} sweeps)", vol.sweeps.len());
+        self.show_scan(format!("file:{name}"), vol);
+    }
+
+    /// Files dropped on the window open like any other scan.
+    fn handle_drops(&mut self, ui: &Ui) {
+        let dropped = ui.input(|i| i.raw.dropped_files.clone());
+        let Some(f) = dropped.into_iter().next() else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        self.net.open_path(f.path().to_path_buf());
+        #[cfg(target_arch = "wasm32")]
+        {
+            // browsers only read files asynchronously
+            let net = self.net.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let name = f.path().to_string_lossy().into_owned();
+                match f.bytes_async().await {
+                    Ok(b) => net.open_bytes(name, b),
+                    Err(e) => net.send(Msg::Local { name, vol: Err(e) }),
+                }
+            });
+        }
+    }
+
     fn go_live(&mut self) {
         self.live = true;
         let s = self.site.clone();
@@ -597,32 +674,15 @@ impl App {
         }
     }
 
-    fn update_alerts(&mut self, list: Vec<Alert>, now: f64) {
+    fn update_alerts(&mut self, mut list: Vec<Alert>, now: f64) {
         self.alerts_error = None;
+        // a simulated warning (alerts panel) stays until it expires
+        self.simulated.retain(|(_, until)| *until > now);
+        list.extend(self.simulated.iter().map(|(al, _)| al.clone()));
         let a = &self.cfg.alerts;
-        let radius = a.radius_km;
-        let proj = self.map.proj;
-        let mut kept: Vec<(Alert, usize)> =
-            list.into_iter()
-                .filter_map(|mut al| {
-                    let rule = a.rules.iter().position(|r| al.matches(r))?;
-                    // Watches have no polygon: outline the counties they cover instead.
-                    if al.polygons.is_empty() && !al.counties.is_empty() {
-                        al.polygons = al
-                            .counties
-                            .iter()
-                            .flat_map(|c| self.map.county(*c))
-                            .collect();
-                        al.county_based = true;
-                    }
-                    let near = radius <= 0.0
-                        || al.polygons.iter().flatten().any(|&(lon, lat)| {
-                            proj.fwd(lon, lat).to_vec2().length() as f64 <= radius
-                        });
-                    near.then_some((al, rule))
-                })
-                .collect();
-        kept.sort_by_key(|(_, r)| *r);
+        let kept = crate::alerts::select(list, &a.rules, a.radius_km, &self.map.proj, |fips| {
+            self.map.county(fips)
+        });
 
         // Sound the most important new alert (rules earlier in the list win).
         let fresh = kept
@@ -634,7 +694,7 @@ impl App {
             && (self.alerts_once || a.on_startup)
         {
             let rule = &a.rules[r];
-            if rule.sound != "none" || rule.file.is_some() {
+            if a.sounds && (rule.sound != "none" || rule.file.is_some()) {
                 self.player.play(
                     &rule.sound,
                     rule.file.as_deref(),
@@ -647,6 +707,46 @@ impl App {
         self.seen.extend(kept.iter().map(|(al, _)| al.id.clone()));
         self.alerts_once = true;
         self.alerts = kept;
+    }
+
+    /// Put a fake confirmed tornado warning just west of the map centre so you can
+    /// see (and hear) what your alert rules look like. It goes away after 3 minutes.
+    fn simulate_warning(&mut self, now: f64) {
+        let c = self.center;
+        // a typical warning box: ~30 km long, angled SW→NE ahead of the storm
+        let corners = [
+            (-18.0, -6.0),
+            (-14.0, 4.0),
+            (10.0, 14.0),
+            (14.0, 2.0),
+            (-18.0, -6.0),
+        ];
+        let ring: Vec<(f64, f64)> = corners
+            .iter()
+            .map(|(x, y)| self.map.proj.inv(pos2(c.x + x - 12.0, c.y + y)))
+            .collect();
+        let al = Alert {
+            id: format!("simulated-{now}"),
+            event: "Tornado Warning".into(),
+            headline: "SIMULATED: a test warning from weather_shark, not a real alert".into(),
+            area: "Simulated County (test)".into(),
+            expires: String::new(),
+            tornado: Some("OBSERVED".into()),
+            damage: None,
+            hail: None,
+            polygons: vec![ring],
+            counties: Vec::new(),
+            county_based: false,
+        };
+        self.simulated.push((al, now + 180.0));
+        self.alerts_once = true; // so it sounds even right after startup
+        let real: Vec<Alert> = self
+            .alerts
+            .iter()
+            .filter(|(a, _)| !a.id.starts_with("simulated-"))
+            .map(|(a, _)| a.clone())
+            .collect();
+        self.update_alerts(real, now);
     }
 
     // ---- radio ------------------------------------------------------------------
@@ -727,10 +827,23 @@ impl App {
                     Err(e) => self.tiles.error = Some(e),
                 },
                 Msg::Tile { key, tile } => self.tiles.done(key, tile),
+                Msg::Local { name, vol } => match vol {
+                    Ok(vol) => self.show_local(name, vol),
+                    Err(e) => self.error = Some(e),
+                },
                 Msg::Radio(res) => match res {
                     Ok(s) => {
                         self.stations = s;
                         self.radio_error = None;
+                        if std::mem::take(&mut self.radio_autoplay)
+                            && let Some(st) = self
+                                .stations_by_distance()
+                                .first()
+                                .map(|(_, s)| (*s).clone())
+                        {
+                            let ctx = self.net.ctx();
+                            self.play_radio(&ctx, &st);
+                        }
                     }
                     Err(e) => self.radio_error = Some(e),
                 },
@@ -845,6 +958,11 @@ impl App {
             && self.tiles.inflight() == 0
             && !self.textures.is_empty();
         self.shot_ready_frames = if ready { self.shot_ready_frames + 1 } else { 0 };
+        if self.shot_ready_frames == 1 && shot.simulate && self.simulated.is_empty() {
+            let now = ctx.input(|i| i.time);
+            self.simulate_warning(now);
+        }
+        let Some(shot) = &self.shot else { return };
         if self.shot_ready_frames != 45 {
             return;
         }
@@ -868,48 +986,75 @@ impl App {
         let _ = shot;
     }
 
+    /// Key bindings come from `keys = { ... }` in the Lua config.
     fn keys_input(&mut self, ui: &Ui) {
         if ui.ctx().memory(|m| m.focused().is_some()) {
             return;
         }
-        let pressed = |k: Key| ui.input(|i| i.key_pressed(k));
-        if pressed(Key::ArrowLeft) {
-            self.step(-1);
-        }
-        if pressed(Key::ArrowRight) {
-            self.step(1);
-        }
-        if pressed(Key::ArrowUp) {
-            self.shift_tilt(1);
-        }
-        if pressed(Key::ArrowDown) {
-            self.shift_tilt(-1);
-        }
-        if pressed(Key::L) {
-            if self.live {
-                self.live = false;
-            } else {
-                self.go_live();
+        let actions: Vec<Action> = self
+            .cfg
+            .keys
+            .iter()
+            .filter(|(_, k)| ui.input(|i| i.key_pressed(*k) && !i.modifiers.command))
+            .map(|(a, _)| *a)
+            .collect();
+        for a in actions {
+            match a {
+                Action::PrevScan => self.step(-1),
+                Action::NextScan => self.step(1),
+                Action::TiltUp => self.shift_tilt(1),
+                Action::TiltDown => self.shift_tilt(-1),
+                Action::Live => {
+                    if self.live {
+                        self.live = false;
+                    } else {
+                        self.go_live();
+                    }
+                }
+                Action::Recenter => {
+                    self.center = Vec2::ZERO;
+                    self.fitted = false;
+                    self.user_moved = false;
+                }
+                Action::AddPane => self.add_pane(),
+                Action::ClosePane => {
+                    if let Some(i) = self.hovered_pane {
+                        self.close_pane(i);
+                    }
+                }
+                Action::Cities => self.show.cities = !self.show.cities,
+                Action::Roads => self.show.roads = !self.show.roads,
+                Action::Warnings => self.show.warnings = !self.show.warnings,
+                Action::Settings => {
+                    self.side = if self.side == Side::Settings {
+                        Side::None
+                    } else {
+                        Side::Settings
+                    };
+                }
+                Action::Open => {
+                    if let Err(e) = self.net.pick_file() {
+                        self.error = Some(e);
+                    }
+                }
+                Action::Radio if self.cfg.radio.enabled => {
+                    if self.playing.is_some() {
+                        self.stop_radio();
+                    } else if let Some((_, st)) = self
+                        .stations_by_distance()
+                        .first()
+                        .map(|(d, s)| (*d, (*s).clone()))
+                    {
+                        self.play_radio(ui.ctx(), &st);
+                    } else {
+                        // no station list yet: fetch it and play the nearest when it arrives
+                        self.radio_autoplay = true;
+                        self.radio_requested = ui.input(|i| i.time);
+                        self.net.radio_list();
+                    }
+                }
+                Action::Radio => {}
             }
-        }
-        if pressed(Key::R) {
-            self.center = Vec2::ZERO;
-            self.fitted = false;
-            self.user_moved = false;
-        }
-        if pressed(Key::N) || pressed(Key::Plus) || pressed(Key::Equals) {
-            self.add_pane();
-        }
-        if pressed(Key::X)
-            && let Some(i) = self.hovered_pane
-        {
-            self.close_pane(i);
-        }
-        if pressed(Key::C) {
-            self.show.cities = !self.show.cities;
-        }
-        if pressed(Key::M) {
-            self.show.roads = !self.show.roads;
         }
     }
 }
@@ -961,6 +1106,7 @@ impl eframe::App for App {
 
         let t = self.cfg.theme.clone();
         self.keys_input(ui);
+        self.handle_drops(ui);
 
         egui::Panel::top("top")
             .exact_size(40.0)
@@ -995,12 +1141,13 @@ impl eframe::App for App {
 
         if self.side != Side::None {
             let width = if self.side == Side::Settings {
-                480.0
+                self.cfg.ui.panel_width * 1.5
             } else {
-                320.0
+                self.cfg.ui.panel_width
             };
             egui::Panel::right("side")
                 .default_size(width)
+                .size_range(220.0..=(ui.available_width() * 0.6).max(240.0))
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
@@ -1035,8 +1182,29 @@ impl eframe::App for App {
                 self.last_rects = rects;
                 self.request_tiles();
                 self.error_toast(ui, area);
+                if ui.input(|i| !i.raw.hovered_files.is_empty()) {
+                    let p = ui.painter();
+                    p.rect_filled(area, t.radius, t.bg.gamma_multiply(0.85));
+                    p.rect_stroke(
+                        area.shrink(6.0),
+                        t.radius,
+                        Stroke::new(2.0, t.accent),
+                        egui::StrokeKind::Inside,
+                    );
+                    p.text(
+                        area.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "drop a NEXRAD Level II file to open it",
+                        FontId::monospace(16.0),
+                        t.fg,
+                    );
+                }
             });
         self.take_screenshot_when_ready(&ctx);
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        false
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {

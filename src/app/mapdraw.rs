@@ -313,6 +313,9 @@ impl App {
 
     pub(super) fn draw_warnings(&self, painter: &Painter, rect: Rect) {
         for (al, r) in &self.alerts {
+            if !self.cfg.alerts.rules[*r].map {
+                continue;
+            }
             let col = self.cfg.alerts.rules[*r].color;
             for poly in &al.polygons {
                 let pts: Vec<Pos2> = poly

@@ -249,6 +249,10 @@ pub struct AlertRule {
     pub repeats: u32,
     pub volume: f32,
     pub color: Color32,
+    /// draw the polygon / county outline on the map
+    pub map: bool,
+    /// show it in the alerts list (and count it on the alerts button)
+    pub list: bool,
 }
 
 #[derive(Clone)]
@@ -258,6 +262,74 @@ pub struct AlertCfg {
     pub volume: f32,
     pub on_startup: bool,
     pub rules: Vec<AlertRule>,
+    /// play sounds at all
+    pub sounds: bool,
+}
+
+/// Something you can bind a key to in `keys = { ... }`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Action {
+    PrevScan,
+    NextScan,
+    TiltUp,
+    TiltDown,
+    AddPane,
+    ClosePane,
+    Live,
+    Recenter,
+    Roads,
+    Cities,
+    Warnings,
+    Settings,
+    Open,
+    Radio,
+}
+
+impl Action {
+    pub const ALL: [(Action, &'static str, &'static str); 14] = [
+        (Action::PrevScan, "prev_scan", "ArrowLeft"),
+        (Action::NextScan, "next_scan", "ArrowRight"),
+        (Action::TiltUp, "tilt_up", "ArrowUp"),
+        (Action::TiltDown, "tilt_down", "ArrowDown"),
+        (Action::AddPane, "add_pane", "N"),
+        (Action::ClosePane, "close_pane", "X"),
+        (Action::Live, "live", "L"),
+        (Action::Recenter, "recenter", "R"),
+        (Action::Roads, "roads", "M"),
+        (Action::Cities, "cities", "C"),
+        (Action::Warnings, "warnings", "W"),
+        (Action::Settings, "settings", "Comma"),
+        (Action::Open, "open", "O"),
+        (Action::Radio, "radio", "Space"),
+    ];
+}
+
+pub const TOOLBAR_ITEMS: [&str; 9] = [
+    "site", "time", "tilt", "panes", "map", "events", "alerts", "radio", "lua",
+];
+
+#[derive(Clone)]
+pub struct UiCfg {
+    /// top bar items, left to right (see TOOLBAR_ITEMS)
+    pub toolbar: Vec<String>,
+    pub header: bool,
+    pub legend: bool,
+    pub readout: bool,
+    pub crosshair: bool,
+    pub toasts: bool,
+    /// width of the alerts / radio panel (the Lua editor gets 1.5×)
+    pub panel_width: f32,
+}
+
+/// Colours for the Lua editor.
+#[derive(Clone)]
+pub struct Syntax {
+    pub keyword: Color32,
+    pub string: Color32,
+    pub number: Color32,
+    pub comment: Color32,
+    pub field: Color32,
+    pub punct: Color32,
 }
 
 #[derive(Clone)]
@@ -306,6 +378,9 @@ pub struct Config {
     pub map: MapStyle,
     pub layout: Layout,
     pub radio: RadioCfg,
+    pub ui: UiCfg,
+    pub keys: Vec<(Action, egui::Key)>,
+    pub syntax: Syntax,
     pub palettes: Vec<(Moment, Palette)>,
     pub alerts: AlertCfg,
     pub bookmarks: Vec<Bookmark>,
@@ -508,6 +583,8 @@ impl Config {
                 repeats: x.get("repeats").num().unwrap_or(1.0).clamp(0.0, 20.0) as u32,
                 volume: x.get("volume").num().unwrap_or(1.0).clamp(0.0, 1.0) as f32,
                 color: col(x.get("color"), &what)?.unwrap_or(theme.accent),
+                map: x.get("map").bool().unwrap_or(true),
+                list: x.get("list").bool().unwrap_or(true),
             });
         }
         let alerts = AlertCfg {
@@ -516,6 +593,71 @@ impl Config {
             volume: a("volume").num().unwrap_or(0.8).clamp(0.0, 1.0) as f32,
             on_startup: a("on_startup").bool().unwrap_or(false),
             rules,
+            sounds: a("sounds").bool().unwrap_or(true),
+        };
+
+        let toolbar: Vec<String> = {
+            let v = if r.get("ui").get("toolbar").is_nil() {
+                d.get("ui").get("toolbar")
+            } else {
+                r.get("ui").get("toolbar")
+            };
+            v.arr()
+                .iter()
+                .filter_map(|x| x.str())
+                .map(str::to_lowercase)
+                .collect()
+        };
+        if let Some(bad) = toolbar
+            .iter()
+            .find(|t| !TOOLBAR_ITEMS.contains(&t.as_str()))
+        {
+            return Err(format!(
+                "ui.toolbar: unknown item {bad:?} (try {})",
+                TOOLBAR_ITEMS.join(", ")
+            ));
+        }
+        let ui = UiCfg {
+            toolbar,
+            header: sub("ui", "header").bool().unwrap_or(true),
+            legend: sub("ui", "legend").bool().unwrap_or(true),
+            readout: sub("ui", "readout").bool().unwrap_or(true),
+            crosshair: sub("ui", "crosshair").bool().unwrap_or(true),
+            toasts: sub("ui", "toasts").bool().unwrap_or(true),
+            panel_width: sub("ui", "panel_width")
+                .num()
+                .unwrap_or(320.0)
+                .clamp(220.0, 900.0) as f32,
+        };
+
+        let mut keys = Vec::new();
+        for (action, name, default) in Action::ALL {
+            let v = r.get("keys").get(name);
+            let k = match v {
+                L::Bool(false) => continue, // keys = { radio = false } unbinds it
+                L::Str(s) => s.as_str(),
+                _ => d.get("keys").get(name).str().unwrap_or(default),
+            };
+            let key = egui::Key::from_name(k)
+                .or_else(|| egui::Key::from_name(&k.to_uppercase()))
+                .ok_or_else(|| format!("keys.{name}: unknown key {k:?} (e.g. \"N\", \"F2\", \"ArrowLeft\", \"Space\")"))?;
+            keys.push((action, key));
+        }
+
+        let syn = |k: &str, fallback: Color32| -> Result<Color32, String> {
+            Ok(
+                col(sub("theme", "syntax").get(k), &format!("theme.syntax.{k}"))?
+                    .or(col(d.get("theme").get("syntax").get(k), "")?)
+                    .unwrap_or(fallback),
+            )
+        };
+        let syntax = Syntax {
+            keyword: syn("keyword", theme.accent)?,
+            string: syn("string", Color32::from_rgb(0x9e, 0xce, 0x6a))?,
+            number: syn("number", Color32::from_rgb(0xff, 0x9e, 0x64))?,
+            comment: syn("comment", theme.muted)?,
+            field: syn("field", Color32::from_rgb(0x7d, 0xcf, 0xff))?,
+            punct: syn("punct", theme.muted)?,
         };
 
         let panes: Vec<Moment> = pick("panes")
@@ -565,6 +707,9 @@ impl Config {
             map,
             layout,
             radio,
+            ui,
+            keys,
+            syntax,
             palettes,
             alerts,
             bookmarks,

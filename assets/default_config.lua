@@ -1,10 +1,14 @@
 -- weather_shark config
 --
--- Native: ~/.config/weather_shark/config.lua (`weather_shark default-config > ~/.config/weather_shark/config.lua`).
--- It reloads automatically when you save. If it has an error, weather_shark keeps
--- the old config and shows the error in the top bar.
--- Web: open the settings panel (the ⚙ button) and edit it there. It is stored in your browser.
+-- Where it lives: ~/.config/weather_shark/config.lua on Linux,
+-- ~/Library/Application Support/weather_shark/ on macOS, %APPDATA%\weather_shark\ on
+-- Windows (`weather_shark --help` prints the exact path). It's written on first run
+-- and reloads automatically when you save. If it has an error, weather_shark keeps
+-- the old config and shows the error.
+-- In the app (and on the web), the `lua` button (or , key) opens this file in an editor.
 --
+-- Almost everything is set here: leave out anything you don't care about and the
+-- default is used. Set a feature's `enabled = false` to remove it completely.
 -- `platform` is "native" or "web" in case you want them to differ.
 -- Colours are "#rrggbb" or "#rrggbbaa".
 
@@ -32,8 +36,9 @@ return {
     view_km         = 160,      -- how far around the radar to show on start (R resets to this)
     velocity_units  = "kt",     -- "kt", "mph" or "ms" (the VEL palette below uses these units)
 
-    -- panes to open with. Add more with the + button (or n), close one with
-    -- its x (or x over it). Each new pane splits the last one, like a tiling WM.
+    -- panes to open with. Add more with the n key (or "panes" in the toolbar),
+    -- close one with its x (or x over it). Each new pane splits the last one,
+    -- like a tiling WM.
     -- products: REF (reflectivity), VEL (velocity), CC (correlation coeff),
     --           ZDR (differential reflectivity), SW (spectrum width), PHI
     panes           = { "REF" },
@@ -58,6 +63,52 @@ return {
         accent    = col.accent,
         radius    = 10,         -- corner rounding of panes
         font_size = 13,
+        syntax = {              -- colours in the built-in Lua editor
+            keyword = col.accent,
+            string  = "#9ece6a",
+            number  = "#ff9e64",
+            comment = col.muted,
+            field   = "#7dcfff",
+            punct   = col.muted,
+        },
+    },
+
+    -- interface -----------------------------------------------------------------
+
+    ui = {
+        -- top bar buttons, left to right. Delete any you don't want; what they do
+        -- is also in this file (and has a key below).
+        --   "site"    radar picker               "time"   scan time, back / forward, live
+        --   "tilt"    elevation angle            "panes"  + pane
+        --   "map"     map layer switches         "events" bookmarks, go to a time, open a file
+        --   "alerts"  warnings list              "radio"  NOAA Weather Radio
+        --   "lua"     this file, in an editor
+        toolbar   = { "site", "time", "tilt", "events", "alerts", "radio", "lua" },
+        header    = true,   -- product picker + title on each pane
+        legend    = true,   -- colour scale
+        readout   = true,   -- value under the cursor
+        crosshair = true,   -- linked cursor across panes
+        toasts    = true,   -- error messages
+        panel_width = 320,  -- alerts / radio side panel (the Lua editor is 1.5× this)
+    },
+
+    -- keys: any egui key name ("N", "F2", "Space", "Comma", "ArrowLeft" ...),
+    -- or false to unbind.
+    keys = {
+        prev_scan  = "ArrowLeft",
+        next_scan  = "ArrowRight",
+        tilt_up    = "ArrowUp",
+        tilt_down  = "ArrowDown",
+        add_pane   = "N",
+        close_pane = "X",       -- the pane under the mouse
+        live       = "L",
+        recenter   = "R",
+        roads      = "M",
+        cities     = "C",
+        warnings   = "W",
+        settings   = "Comma",   -- open this file in the editor
+        open       = "O",       -- open a radar file (you can also drop one on the window)
+        radio      = "Space",   -- play / stop the nearest NOAA Weather Radio stream
     },
 
     map = {
@@ -66,6 +117,7 @@ return {
         range_rings  = "#a78bfa30", -- every 50 km; set to false to hide
         sites        = col.accent,  -- radar site dots
         site_labels  = true,
+        -- every layer can be turned off with false (states, counties, range_rings, roads ...)
         crosshair    = "#ffffffcc",
         warnings     = true,        -- draw warning polygons / watch counties
 
@@ -90,7 +142,7 @@ return {
     -- Live streams from wxradio.org (volunteer-run, one stream at a time).
     -- They can lag 30 s or more: never rely on them instead of a real NWR receiver.
     radio = {
-        enabled = true,
+        enabled = true,     -- false removes the radio button, panel and key
         volume  = 0.8,
     },
 
@@ -174,8 +226,11 @@ return {
     },
 
     -- alerts --------------------------------------------------------------------
-    -- Active NWS warnings are checked every refresh_seconds. Each new alert
-    -- uses the first rule that matches it.
+    -- Active NWS alerts are checked every refresh_seconds. ONLY the events that
+    -- have a rule below are fetched and shown, so this list is also your filter:
+    -- delete the watch lines to only see warnings, or add
+    --   { event = "Flash Flood Warning", sound = "none", color = "#4fd6ff" },
+    -- to see flash floods too. Each alert uses the first rule that matches it.
     --
     -- rule fields (all optional except event):
     --   event    NWS event name, e.g. "Tornado Warning"
@@ -187,12 +242,15 @@ return {
     --   repeats  how many times to play the sound
     --   volume   0..1
     --   color    outline colour on the map and in the list
+    --   map      false = don't draw it on the map
+    --   list     false = don't show it in the alerts list
     --
     -- Warnings come with a storm-based polygon. Watches don't, so they are
     -- drawn as the outlines of the counties they cover (dashed).
 
     alerts = {
-        enabled    = true,
+        enabled    = true,  -- false turns off alerts completely (no polygons, list or sounds)
+        sounds     = true,  -- false keeps the polygons and list but never plays a sound
         radius_km  = 300,   -- only alerts this close to the radar (0 = whole country)
         volume     = 0.8,
         on_startup = false, -- also sound alerts that were already active when the app opened
@@ -207,7 +265,7 @@ return {
         },
     },
 
-    -- past events (click one in the ★ menu to load it) --------------------------
+    -- past events (in the "events" menu) -----------------------------------------
 
     bookmarks = {
         { name = "Moore EF5",        site = "KTLX", time = "2013-05-20 20:08" },

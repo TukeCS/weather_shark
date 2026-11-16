@@ -37,6 +37,11 @@ pub enum Msg {
         tile: Result<TileData, String>,
     },
     Radio(Result<Vec<Station>, String>),
+    /// A radar file the user opened (dropped, picked, or passed on the command line).
+    Local {
+        name: String,
+        vol: Result<Arc<Volume>, String>,
+    },
 }
 
 #[derive(Clone)]
@@ -50,7 +55,11 @@ impl Net {
         Self { tx, ctx }
     }
 
-    fn send(&self, m: Msg) {
+    pub fn ctx(&self) -> egui::Context {
+        self.ctx.clone()
+    }
+
+    pub(crate) fn send(&self, m: Msg) {
         let _ = self.tx.send(m);
         self.ctx.request_repaint();
     }
@@ -240,6 +249,64 @@ impl Net {
             });
             me.send(Msg::Tile { key, tile });
         });
+    }
+
+    /// Decode a local Level II file (off the UI thread on native).
+    pub fn open_bytes(&self, name: String, bytes: Vec<u8>) {
+        let me = self.clone();
+        let work = move || {
+            let vol = level2::parse(&bytes).map(Arc::new);
+            me.send(Msg::Local { name, vol });
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        std::thread::spawn(work);
+        #[cfg(target_arch = "wasm32")]
+        work();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_path(&self, path: std::path::PathBuf) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match std::fs::read(&path) {
+            Ok(b) => self.open_bytes(name, b),
+            Err(e) => self.send(Msg::Local {
+                name,
+                vol: Err(format!("can't read {}: {e}", path.display())),
+            }),
+        }
+    }
+
+    /// Show the system file dialog. On the web this is a file input; the bytes come back as a message.
+    pub fn pick_file(&self) -> Result<(), String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let t = web_time::Instant::now();
+            match rfd::FileDialog::new()
+                .set_title("Open a NEXRAD Level II file")
+                .pick_file()
+            {
+                Some(p) => self.open_path(p),
+                // Returned instantly without a dialog: no file chooser on this system.
+                None if t.elapsed().as_millis() < 250 => {
+                    return Err("no file dialog on this system: drop the file on the window, or run weather_shark FILE".into());
+                }
+                None => {}
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let me = self.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Some(f) = rfd::AsyncFileDialog::new().pick_file().await {
+                    let name = f.file_name();
+                    me.open_bytes(name, f.read().await);
+                }
+            });
+        }
+        Ok(())
     }
 
     pub fn radio_list(&self) {

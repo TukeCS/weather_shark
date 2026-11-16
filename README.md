@@ -30,19 +30,37 @@ i got tired of paying subscriptions
   OpenStreetMap, plus state and county lines. Every layer can be toggled
 - Click any radar site on the map to switch to it, or search by name
 - Live NWS warnings drawn as their storm polygons; watches drawn as the counties they cover.
-  Each kind can play its own sound (a siren for a confirmed tornado by default)
+  You pick which kinds show up, and each can play its own sound (a siren for a confirmed tornado
+  by default). A "simulate" button previews your warning colours and sounds
 - NOAA Weather Radio: live streams from the transmitters nearest your radar
 - Bookmarks for past events (Moore, El Reno, Joplin, Mayfield, Rolling Fork)
-- Lua config that hot-reloads on save, with an in-app editor
+- Open your own Level II files: drop one on the window, pass it on the command line, or use
+  "open file…" in the events menu
+- Almost everything is in the Lua config: which toolbar buttons exist (and their order), key
+  bindings, every map layer, alert types and sounds, colours. It hot-reloads on save, and the
+  in-app editor has syntax colouring with colour swatches
+- Runs on Linux, macOS, Windows and in the browser
 - Scans are decoded while they download: the lowest tilt shows up after roughly a fifth of the
   file, with a progress bar for the rest, and recent scans are cached so stepping through them is instant
+
+## Install
+
+Download a build for Linux, macOS or Windows from the
+[releases page](https://github.com/TukeCS/weather_shark/releases), or build it yourself:
+
+```sh
+cargo install --git https://github.com/TukeCS/weather_shark
+```
 
 ## Running
 
 ```sh
-cargo run --release                               # live, starting at the site in your config
-cargo run --release -- KTLX "2013-05-20 20:08"    # a past scan (UTC)
+weather_shark                                # live, starting at the site in your config
+weather_shark KTLX "2013-05-20 20:08"        # a past scan (UTC)
+weather_shark ~/Downloads/KTLX20130520_201229_V06   # a Level II file you have
 ```
+
+You can also drop a radar file onto the window.
 
 On Linux, sound goes through PulseAudio/PipeWire when it's running (falling back to ALSA), and
 building needs the `libasound` headers. To check your speakers:
@@ -60,22 +78,32 @@ weather_shark screenshot out.png KTLX "2013-05-20 20:13" --panes REF,VEL --layou
 
 ### Keys
 
+These are the defaults; every one can be changed or turned off in `keys = { ... }`.
+
 | key | |
 |---|---|
 | drag / scroll | pan / zoom (double-click zooms in) |
 | ← → | previous / next scan |
 | ↑ ↓ | tilt |
-| n | add a pane |
-| x | close the pane under the mouse |
-| m / c | toggle roads / city names |
+| N | add a pane |
+| X | close the pane under the mouse |
+| M / C / W | toggle roads / city names / warnings |
 | L | follow live |
 | R | recentre on the radar (zoom from `view_km`) |
+| O | open a radar file |
+| Space | play / stop the nearest NOAA Weather Radio stream |
+| , | open the config editor |
 
 ## Config
 
-The config lives at `~/.config/weather_shark/config.lua` and is written on first run. You can also
-get a fresh copy with `weather_shark default-config`. It reloads when you save it.
-`weather_shark check` validates it without opening a window.
+The config is written on first run to:
+
+- Linux: `~/.config/weather_shark/config.lua`
+- macOS: `~/Library/Application Support/weather_shark/config.lua` (or `~/.config/weather_shark/` if you have it)
+- Windows: `%APPDATA%\weather_shark\config.lua`
+
+`weather_shark --help` prints the exact path, `weather_shark default-config` prints a fresh copy and
+`weather_shark check` validates yours without opening a window. It reloads when you save it.
 
 The script returns a table. Anything you leave out falls back to the default, so a config can be
 as small as:
@@ -88,7 +116,10 @@ return {
 }
 ```
 
-Alert rules are checked in order and the first match wins:
+Only the alert types that have a rule are fetched and shown, so the rules are also your filter:
+leave out the watches to only see warnings, or add a `Flash Flood Warning` rule to see those.
+Rules are checked in order and the first match wins. `map = false` or `list = false` hides a type
+from the map or the list, and `sounds = false` silences everything:
 
 ```lua
 alerts = {
@@ -103,12 +134,15 @@ alerts = {
 },
 ```
 
-Layout and map layers:
+Layout, map layers, the toolbar and keys:
 
 ```lua
 panes  = { "REF" },                         -- what opens on start
 layout = { mode = "spiral", ratio = 0.5 },  -- spiral, dwindle, columns, grid
-map    = { roads = true, cities = true, road_labels = true },
+map    = { roads = true, cities = true, road_labels = true, counties = false },
+radio  = { enabled = false },               -- removes the radio completely
+ui     = { toolbar = { "site", "time", "alerts" }, legend = false },
+keys   = { add_pane = "F2", radio = false },
 ```
 
 Built-in sounds are `siren`, `alarm` (EAS-style two-tone), `beep` and `chime`. `file` plays a
