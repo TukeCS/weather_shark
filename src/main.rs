@@ -126,9 +126,26 @@ fn main() -> eframe::Result {
             }
             return Ok(());
         }
+        Some("-V" | "--version") => {
+            println!("weather_shark {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         Some("-h" | "--help") => {
             println!(
-                "weather_shark [SITE [\"YYYY-MM-DD HH:MM\"]] | default-config | check [file]\nconfig: {}",
+                "weather_shark {}
+
+usage:
+  weather_shark                            live radar from the site in your config
+  weather_shark SITE [\"YYYY-MM-DD HH:MM\"]  a radar site, optionally a past scan (UTC)
+  weather_shark FILE                       open a NEXRAD Level II file
+  weather_shark default-config             print the default config.lua
+  weather_shark check [FILE]               validate a config without opening a window
+  weather_shark test-sound [siren|alarm|beep|chime|radio]
+  weather_shark screenshot OUT.png [SITE [TIME]] [--panes REF,VEL] [--view KM]
+                [--layout columns] [--at LAT,LON] [--panel lua|alerts|radio] [--simulate]
+
+config: {}",
+                env!("CARGO_PKG_VERSION"),
                 config_path().display()
             );
             return Ok(());
