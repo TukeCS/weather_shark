@@ -6,6 +6,15 @@ use super::{App, Side, heading};
 use crate::config::{Action, DEFAULT_LUA, MAX_PANES};
 use crate::net;
 
+#[derive(Clone, Copy)]
+enum CardAction {
+    Focus,
+    Remove,
+    Hide,
+    Show,
+    ShowAll,
+}
+
 const ERR: Color32 = Color32::from_rgb(255, 130, 130);
 const LIVE_RED: Color32 = Color32::from_rgb(255, 69, 95);
 
@@ -91,7 +100,9 @@ impl App {
                         let listed: Vec<_> = self
                             .alerts
                             .iter()
-                            .filter(|(_, r)| self.cfg.alerts.rules[*r].list)
+                            .filter(|(a, r)| {
+                                self.cfg.alerts.rules[*r].list && !self.hidden.contains(&a.id)
+                            })
                             .collect();
                         let n = listed.len();
                         let warn = listed
@@ -405,78 +416,62 @@ impl App {
             );
         }
         let mut focus = None;
-        let mut dismiss: Option<String> = None;
+        let mut action: Option<(CardAction, String)> = None;
+        let listed: Vec<(usize, bool)> = self
+            .alerts
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, r))| self.cfg.alerts.rules[*r].list)
+            .map(|(i, (a, _))| (i, self.hidden.contains(&a.id)))
+            .collect();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for (al, r) in &self.alerts {
-                if !self.cfg.alerts.rules[*r].list {
-                    continue;
+            for &(i, _) in listed.iter().filter(|(_, hidden)| !hidden) {
+                if let Some(a) = self.alert_card(ui, i, false) {
+                    action = Some(a);
                 }
-                let col = self.cfg.alerts.rules[*r].color.to_opaque();
-                // card fills the panel minus its own margin + border, so it can't push the panel wider
-                let card_w = ui.available_width() - 22.0;
-                let resp = egui::Frame::new()
-                    .fill(t.panel)
-                    .stroke(Stroke::new(1.0, t.line))
-                    .corner_radius(8)
-                    .inner_margin(10)
-                    .show(ui, |ui| {
-                        ui.set_width(card_w);
-                        let simulated = al.id.starts_with("simulated-");
-                        egui::Sides::new().show(
-                            ui,
-                            |ui| {
-                                let (b, _) =
-                                    ui.allocate_exact_size(vec2(4.0, 16.0), Sense::hover());
-                                ui.painter().rect_filled(b, 2, col);
-                                ui.label(RichText::new(&al.event).color(col).strong());
-                                if let Some(tag) = al.tag() {
-                                    ui.label(
-                                        RichText::new(tag)
-                                            .small()
-                                            .background_color(col.gamma_multiply(0.25))
-                                            .color(col),
-                                    );
-                                }
-                                if simulated {
-                                    ui.label(
-                                        RichText::new("TEST")
-                                            .small()
-                                            .background_color(t.line)
-                                            .color(t.fg),
-                                    );
-                                }
-                            },
-                            |ui| {
-                                if simulated
-                                    && ui
-                                        .small_button("×")
-                                        .on_hover_text("remove this test warning")
-                                        .clicked()
-                                {
-                                    dismiss = Some(al.id.clone());
-                                }
-                            },
-                        );
-                        ui.label(RichText::new(&al.area).small());
-                        let mut extra = String::new();
-                        if let Some(h) = al.hail {
-                            extra += &format!("hail {h:.2}\"  ");
+            }
+            let hidden: Vec<usize> = listed.iter().filter(|(_, h)| *h).map(|(i, _)| *i).collect();
+            if !hidden.is_empty() {
+                ui.add_space(6.0);
+                egui::Sides::new().show(
+                    ui,
+                    |ui| {
+                        ui.label(
+                            RichText::new(format!("HIDDEN ({})", hidden.len()))
+                                .color(t.muted)
+                                .small(),
+                        )
+                    },
+                    |ui| {
+                        if ui.small_button("show all").clicked() {
+                            action = Some((CardAction::ShowAll, String::new()));
                         }
-                        if let Some(e) = al.expires.get(11..16) {
-                            extra += &format!("until {e} local");
-                        }
-                        ui.label(RichText::new(extra).color(t.muted).small());
-                    })
-                    .response
-                    .interact(Sense::click());
-                if resp.on_hover_text(&al.headline).clicked() {
-                    focus = Some(al.polygons.clone());
+                    },
+                );
+                for i in hidden {
+                    if let Some(a) = self.alert_card(ui, i, true) {
+                        action = Some(a);
+                    }
                 }
-                ui.add_space(4.0);
             }
         });
-        if let Some(id) = dismiss {
-            self.clear_simulated(Some(&id));
+        match action {
+            Some((CardAction::Focus, id)) => {
+                focus = self
+                    .alerts
+                    .iter()
+                    .find(|(a, _)| a.id == id)
+                    .map(|(a, _)| a.polygons.clone());
+            }
+            Some((CardAction::Remove, id)) => self.clear_simulated(Some(&id)),
+            Some((CardAction::Hide, id)) => {
+                self.hidden.insert(id);
+            }
+            Some((CardAction::Show, id)) => {
+                self.hidden.remove(&id);
+            }
+            Some((CardAction::ShowAll, _)) => self.hidden.clear(),
+            None => {}
         }
         if let Some(polys) = focus {
             let pts: Vec<egui::Pos2> = polys
@@ -490,6 +485,82 @@ impl App {
                 self.zoom = self.zoom.max(3.0);
             }
         }
+    }
+
+    /// One alert card. Clicking the card zooms to it; real warnings can be hidden
+    /// (never deleted), simulated ones removed.
+    fn alert_card(&self, ui: &mut Ui, i: usize, hidden: bool) -> Option<(CardAction, String)> {
+        let t = &self.cfg.theme;
+        let (al, r) = &self.alerts[i];
+        let rule_col = self.cfg.alerts.rules[*r].color.to_opaque();
+        let col = if hidden {
+            rule_col.gamma_multiply(0.5)
+        } else {
+            rule_col
+        };
+        let simulated = al.id.starts_with("simulated-");
+        let mut out = None;
+        // card fills the panel minus its own margin + border, so it can't push the panel wider
+        let card_w = ui.available_width() - 22.0;
+        // The card's click is registered first, so the buttons inside it still get their clicks.
+        let card = ui.scope_builder(egui::UiBuilder::new().id_salt(("alert", &al.id)).sense(Sense::click()), |ui| {
+            egui::Frame::new()
+                .fill(if hidden { t.bg } else { t.panel })
+                .stroke(Stroke::new(1.0, t.line))
+                .corner_radius(8)
+                .inner_margin(10)
+                .show(ui, |ui| {
+                    ui.set_width(card_w);
+                    egui::Sides::new().show(
+                        ui,
+                        |ui| {
+                            let (b, _) = ui.allocate_exact_size(vec2(4.0, 16.0), Sense::hover());
+                            ui.painter().rect_filled(b, 2, col);
+                            ui.label(RichText::new(&al.event).color(col).strong());
+                            if let Some(tag) = al.tag() {
+                                ui.label(RichText::new(tag).small().background_color(col.gamma_multiply(0.25)).color(col));
+                            }
+                            if simulated {
+                                ui.label(RichText::new("TEST").small().background_color(t.line).color(t.fg));
+                            }
+                        },
+                        |ui| {
+                            let id = al.id.clone();
+                            if simulated {
+                                if ui.small_button("×").on_hover_text("remove this test warning").clicked() {
+                                    out = Some((CardAction::Remove, id));
+                                }
+                            } else if hidden {
+                                if ui.small_button("show").on_hover_text("put it back on the map").clicked() {
+                                    out = Some((CardAction::Show, id));
+                                }
+                            } else if ui
+                                .small_button("hide")
+                                .on_hover_text("hide it from the map (it stays in the list under HIDDEN, and you can show it again)")
+                                .clicked()
+                            {
+                                out = Some((CardAction::Hide, id));
+                            }
+                        },
+                    );
+                    if !hidden {
+                        ui.label(RichText::new(&al.area).small());
+                        let mut extra = String::new();
+                        if let Some(h) = al.hail {
+                            extra += &format!("hail {h:.2}\"  ");
+                        }
+                        if let Some(e) = al.expires.get(11..16) {
+                            extra += &format!("until {e} local");
+                        }
+                        ui.label(RichText::new(extra).color(t.muted).small());
+                    }
+                });
+        });
+        if out.is_none() && card.response.on_hover_text(&al.headline).clicked() {
+            out = Some((CardAction::Focus, al.id.clone()));
+        }
+        ui.add_space(4.0);
+        out
     }
 
     pub(super) fn radio_panel(&mut self, ui: &mut Ui, now: f64) {
@@ -631,5 +702,93 @@ impl App {
             StrokeKind::Inside,
         );
         p.galley(r.min + vec2(8.0, 8.0), galley, t.fg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, PointerButton, Pos2, RawInput, Rect, Sense, UiBuilder, vec2};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Card {
+        /// what shipped: Frame + Sides, then the whole frame made clickable afterwards
+        Old,
+        /// the fix: click sense registered first via UiBuilder, then Frame + Sides
+        New,
+    }
+
+    /// Render a card like the alerts panel's, click the × and report (× clicked, card clicked).
+    fn click_x(kind: Card) -> (bool, bool) {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(360.0, 300.0));
+        let mut x_rect = Rect::NOTHING;
+        let mut result = (false, false);
+        for frame in 0..6 {
+            let at = x_rect.center();
+            let mut input = RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            match frame {
+                3 => input.events.push(Event::PointerMoved(at)),
+                4 => input.events.push(Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                }),
+                5 => input.events.push(Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }),
+                _ => {}
+            }
+            let _ = ctx.run_ui(input, |ui| {
+                let mut x = false;
+                let body = |ui: &mut egui::Ui, x: &mut bool, x_rect: &mut Rect| {
+                    egui::Frame::new().inner_margin(10).show(ui, |ui| {
+                        ui.set_width(300.0);
+                        egui::Sides::new().show(
+                            ui,
+                            |ui| ui.label("Tornado Warning"),
+                            |ui| {
+                                let r = ui.small_button("×");
+                                *x_rect = r.rect;
+                                *x |= r.clicked();
+                            },
+                        );
+                        ui.label("Simulated County (test)");
+                    })
+                };
+                let card = match kind {
+                    Card::Old => body(ui, &mut x, &mut x_rect)
+                        .response
+                        .interact(Sense::click()),
+                    Card::New => {
+                        ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| {
+                            body(ui, &mut x, &mut x_rect)
+                        })
+                        .response
+                    }
+                };
+                result.0 |= x;
+                result.1 |= card.clicked();
+            });
+        }
+        result
+    }
+
+    #[test]
+    fn the_x_on_an_alert_card_gets_the_click() {
+        let old = click_x(Card::Old);
+        let new = click_x(Card::New);
+        eprintln!("old {old:?}  new {new:?}");
+        assert_eq!(
+            new,
+            (true, false),
+            "the × must receive the click, not the card"
+        );
     }
 }

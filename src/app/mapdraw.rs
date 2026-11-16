@@ -313,7 +313,7 @@ impl App {
 
     pub(super) fn draw_warnings(&self, painter: &Painter, rect: Rect) {
         for (al, r) in &self.alerts {
-            if !self.cfg.alerts.rules[*r].map {
+            if !self.cfg.alerts.rules[*r].map || self.hidden.contains(&al.id) {
                 continue;
             }
             let col = self.cfg.alerts.rules[*r].color;

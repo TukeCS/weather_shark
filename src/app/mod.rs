@@ -151,6 +151,8 @@ pub struct App {
     alarm_until: f64,
     /// test warnings from the "simulate" button, with their expiry time
     simulated: Vec<(Alert, f64)>,
+    /// warnings the user hid from the map (they stay listed under HIDDEN)
+    hidden: HashSet<String>,
     player: Player,
 
     stations: Vec<Station>,
@@ -281,6 +283,7 @@ impl App {
             last_alerts: f64::NEG_INFINITY,
             alarm_until: 0.0,
             simulated: Vec::new(),
+            hidden: HashSet::new(),
             player: Player::new(),
             stations: Vec::new(),
             radio_error: None,
@@ -704,6 +707,9 @@ impl App {
             }
             self.alarm_until = now + 30.0;
         }
+        // forget hidden warnings once the NWS has cancelled / expired them
+        self.hidden
+            .retain(|id| kept.iter().any(|(al, _)| &al.id == id));
         self.seen.extend(kept.iter().map(|(al, _)| al.id.clone()));
         self.alerts_once = true;
         self.alerts = kept;
