@@ -88,6 +88,11 @@ impl Player {
 
     pub fn unlock(&mut self) {}
 
+    /// Stop every alert sound that's playing.
+    pub fn stop(&mut self) {
+        self.sink = None; // dropping the output stops its mixer; the next play reopens it
+    }
+
     fn sink(&mut self) -> Option<&rodio::MixerDeviceSink> {
         if self.sink.is_none() && !self.failed {
             match rodio::DeviceSinkBuilder::open_default_sink() {
@@ -153,12 +158,24 @@ impl Player {
 #[cfg(target_arch = "wasm32")]
 pub struct Player {
     ctx: Option<web_sys::AudioContext>,
+    playing: Vec<web_sys::AudioBufferSourceNode>,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl Player {
     pub fn new() -> Self {
-        Self { ctx: None }
+        Self {
+            ctx: None,
+            playing: Vec::new(),
+        }
+    }
+
+    /// Stop every alert sound that's playing.
+    pub fn stop(&mut self) {
+        for s in self.playing.drain(..) {
+            #[allow(deprecated)]
+            let _ = s.stop();
+        }
     }
 
     /// Browsers only allow audio after a user gesture, so this is called on clicks.
@@ -166,23 +183,23 @@ impl Player {
         if self.ctx.is_none() {
             self.ctx = web_sys::AudioContext::new().ok();
         }
-        if let Some(c) = &self.ctx {
-            if c.state() == web_sys::AudioContextState::Suspended {
-                let _ = c.resume();
-            }
+        if let Some(c) = &self.ctx
+            && c.state() == web_sys::AudioContextState::Suspended
+        {
+            let _ = c.resume();
         }
     }
 
     pub fn play(&mut self, kind: &str, _file: Option<&str>, repeats: u32, volume: f32) {
         self.unlock();
         let Some(c) = &self.ctx else { return };
-        let mut samples = sequence(kind, repeats);
+        let samples = sequence(kind, repeats);
         if samples.is_empty() {
             return;
         }
-        let mut run = || -> Result<(), wasm_bindgen::JsValue> {
+        let run = || -> Result<web_sys::AudioBufferSourceNode, wasm_bindgen::JsValue> {
             let buf = c.create_buffer(1, samples.len() as u32, RATE as f32)?;
-            buf.copy_to_channel(&mut samples, 0)?;
+            buf.copy_to_channel(&samples, 0)?;
             let src = c.create_buffer_source()?;
             src.set_buffer(Some(&buf));
             let gain = c.create_gain()?;
@@ -190,10 +207,16 @@ impl Player {
             src.connect_with_audio_node(&gain)?;
             gain.connect_with_audio_node(&c.destination())?;
             src.start()?;
-            Ok(())
+            Ok(src)
         };
-        if let Err(e) = run() {
-            log::warn!("audio: {e:?}");
+        match run() {
+            Ok(src) => {
+                if self.playing.len() > 8 {
+                    self.playing.remove(0);
+                }
+                self.playing.push(src);
+            }
+            Err(e) => log::warn!("audio: {e:?}"),
         }
     }
 }

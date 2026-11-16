@@ -709,6 +709,21 @@ impl App {
         self.alerts = kept;
     }
 
+    /// Remove simulated warnings (all, or just one by id) and stop their sound.
+    fn clear_simulated(&mut self, id: Option<&str>) {
+        let gone = |a: &Alert| a.id.starts_with("simulated-") && id.is_none_or(|i| a.id == i);
+        self.simulated.retain(|(a, _)| !gone(a));
+        self.alerts.retain(|(a, _)| !gone(a));
+        if !self
+            .alerts
+            .iter()
+            .any(|(a, _)| a.id.starts_with("simulated-"))
+        {
+            self.player.stop();
+            self.alarm_until = 0.0;
+        }
+    }
+
     /// Put a fake confirmed tornado warning just west of the map centre so you can
     /// see (and hear) what your alert rules look like. It goes away after 3 minutes.
     fn simulate_warning(&mut self, now: f64) {
@@ -1067,6 +1082,15 @@ impl eframe::App for App {
         #[cfg(not(target_arch = "wasm32"))]
         self.watch_config(&ctx, now);
         self.tiles.next_frame();
+        // simulated warnings disappear on time, not at the next alert refresh
+        if let Some(id) = self
+            .simulated
+            .iter()
+            .find(|(_, until)| *until <= now)
+            .map(|(a, _)| a.id.clone())
+        {
+            self.clear_simulated(Some(&id));
+        }
 
         if ui.input(|i| i.pointer.any_pressed()) {
             self.player.unlock();

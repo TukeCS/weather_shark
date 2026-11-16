@@ -380,7 +380,12 @@ impl App {
             ui,
             |ui| ui.label(RichText::new("ACTIVE WARNINGS & WATCHES").color(t.muted).small()),
             |ui| {
-                let hint = "show a fake confirmed tornado warning on the map (and play its sound) to preview your alert rules";
+                if !self.simulated.is_empty()
+                    && ui.small_button("clear").on_hover_text("remove the simulated warnings and stop the sound").clicked()
+                {
+                    self.clear_simulated(None);
+                }
+                let hint = "show a fake confirmed tornado warning on the map (and play its sound) to preview your alert rules. It goes away by itself after 3 minutes";
                 if ui.small_button("simulate").on_hover_text(hint).clicked() {
                     let now = ui.input(|i| i.time);
                     self.simulate_warning(now);
@@ -400,6 +405,7 @@ impl App {
             );
         }
         let mut focus = None;
+        let mut dismiss: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (al, r) in &self.alerts {
                 if !self.cfg.alerts.rules[*r].list {
@@ -415,19 +421,42 @@ impl App {
                     .inner_margin(10)
                     .show(ui, |ui| {
                         ui.set_width(card_w);
-                        ui.horizontal(|ui| {
-                            let (b, _) = ui.allocate_exact_size(vec2(4.0, 16.0), Sense::hover());
-                            ui.painter().rect_filled(b, 2, col);
-                            ui.label(RichText::new(&al.event).color(col).strong());
-                            if let Some(tag) = al.tag() {
-                                ui.label(
-                                    RichText::new(tag)
-                                        .small()
-                                        .background_color(col.gamma_multiply(0.25))
-                                        .color(col),
-                                );
-                            }
-                        });
+                        let simulated = al.id.starts_with("simulated-");
+                        egui::Sides::new().show(
+                            ui,
+                            |ui| {
+                                let (b, _) =
+                                    ui.allocate_exact_size(vec2(4.0, 16.0), Sense::hover());
+                                ui.painter().rect_filled(b, 2, col);
+                                ui.label(RichText::new(&al.event).color(col).strong());
+                                if let Some(tag) = al.tag() {
+                                    ui.label(
+                                        RichText::new(tag)
+                                            .small()
+                                            .background_color(col.gamma_multiply(0.25))
+                                            .color(col),
+                                    );
+                                }
+                                if simulated {
+                                    ui.label(
+                                        RichText::new("TEST")
+                                            .small()
+                                            .background_color(t.line)
+                                            .color(t.fg),
+                                    );
+                                }
+                            },
+                            |ui| {
+                                if simulated
+                                    && ui
+                                        .small_button("×")
+                                        .on_hover_text("remove this test warning")
+                                        .clicked()
+                                {
+                                    dismiss = Some(al.id.clone());
+                                }
+                            },
+                        );
                         ui.label(RichText::new(&al.area).small());
                         let mut extra = String::new();
                         if let Some(h) = al.hail {
@@ -446,6 +475,9 @@ impl App {
                 ui.add_space(4.0);
             }
         });
+        if let Some(id) = dismiss {
+            self.clear_simulated(Some(&id));
+        }
         if let Some(polys) = focus {
             let pts: Vec<egui::Pos2> = polys
                 .iter()
