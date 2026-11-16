@@ -29,6 +29,7 @@ return {
     live            = true,     -- follow the newest scan
     refresh_seconds = 60,       -- how often to look for a new scan / new alerts
     tilt            = 0.5,      -- elevation angle in degrees
+    view_km         = 160,      -- how far around the radar to show on start (R resets to this)
     velocity_units  = "kt",     -- "kt", "mph" or "ms" (the VEL palette below uses these units)
 
     -- panes to open with. Add more with the + button (or n), close one with

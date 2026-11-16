@@ -55,7 +55,7 @@ weather_shark test-sound radio      # 15 s of the Oklahoma City NOAA Weather Rad
 | x | close the pane under the mouse |
 | m / c | toggle roads / city names |
 | L | follow live |
-| R | recentre on the radar |
+| R | recentre on the radar (zoom from `view_km`) |
 
 ## Config
 

@@ -807,7 +807,7 @@ impl eframe::App for App {
         let repaint = if now < self.alarm_until { 0 } else { 5 };
         ctx.request_repaint_after(std::time::Duration::from_secs(repaint));
 
-        // fit ~160 km around the radar until the user moves the map (the window
+        // fit `view_km` around the radar until the user moves the map (the window
         // may still be settling into its size on the first frames)
         if !self.fitted || !self.user_moved {
             let r = ui.available_rect_before_wrap();
@@ -816,7 +816,7 @@ impl eframe::App for App {
                 .iter()
                 .map(|r| r.width().min(r.height()))
                 .fold(f32::INFINITY, f32::min);
-            self.zoom = (w / 320.0).max(0.3);
+            self.zoom = (w / (2.0 * self.cfg.view_km)).max(0.05);
             self.fitted = true;
         }
 

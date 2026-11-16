@@ -301,6 +301,7 @@ pub struct Config {
     pub panes: Vec<Moment>,
     pub smooth: bool,
     pub image_size: usize,
+    pub view_km: f32,
     pub theme: Theme,
     pub map: MapStyle,
     pub layout: Layout,
@@ -555,6 +556,7 @@ impl Config {
             },
             panes,
             smooth: pick("smooth").bool().unwrap_or(false),
+            view_km: pick("view_km").num().unwrap_or(160.0).clamp(10.0, 2000.0) as f32,
             image_size: pick("image_size")
                 .num()
                 .unwrap_or(2048.0)
