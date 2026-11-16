@@ -66,6 +66,31 @@ fn main() -> eframe::Result {
             }
             return Ok(());
         }
+        Some("test-sound") => {
+            // `weather_shark test-sound [siren|alarm|beep|chime]` or `test-sound radio [CALLSIGN-mount]`
+            let what = std::env::args().nth(2).unwrap_or_else(|| "siren".into());
+            if what == "radio" {
+                let mount = std::env::args()
+                    .nth(3)
+                    .unwrap_or_else(|| "OK-OklahomaCity-WXK85".into());
+                let mut r = radio::RadioPlayer::new();
+                r.play(
+                    &format!("https://wxradio.org/{mount}"),
+                    egui::Context::default(),
+                );
+                println!("playing {mount} for 15 s…");
+                for _ in 0..15 {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    println!("  {}", r.status());
+                }
+            } else {
+                let mut p = sound::Player::new();
+                p.play(&what, None, 1, 1.0);
+                println!("playing {what}…");
+                std::thread::sleep(std::time::Duration::from_secs(4));
+            }
+            return Ok(());
+        }
         Some("-h" | "--help") => {
             println!(
                 "weather_shark [SITE [\"YYYY-MM-DD HH:MM\"]] | default-config | check [file]\nconfig: {}",

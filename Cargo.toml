@@ -18,6 +18,11 @@ web-time = "1.1.0"
 rodio = { version = "0.23", default-features = false, features = ["playback", "wav", "mp3"] }
 ureq = "3"
 
+# Talk to PulseAudio / PipeWire directly instead of ALSA's "default" device,
+# which on many PipeWire systems points at a busy hardware device and plays nothing.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18", features = ["pulseaudio"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 wasm-bindgen = "0.2.130"

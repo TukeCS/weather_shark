@@ -36,7 +36,13 @@ cargo run --release                               # live, starting at the site i
 cargo run --release -- KTLX "2013-05-20 20:08"    # a past scan (UTC)
 ```
 
-On Linux, sound needs ALSA (`libasound` headers to build).
+On Linux, sound goes through PulseAudio/PipeWire when it's running (falling back to ALSA), and
+building needs the `libasound` headers. To check your speakers:
+
+```sh
+weather_shark test-sound siren      # or alarm, beep, chime
+weather_shark test-sound radio      # 15 s of the Oklahoma City NOAA Weather Radio stream
+```
 
 ### Keys
 
