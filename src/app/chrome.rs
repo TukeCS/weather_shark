@@ -218,25 +218,61 @@ impl App {
                 }
                 if level >= 2 && has("time") {
                     ui.separator();
-                    ui.menu_button(format!("loop length: {} min", self.loop_minutes), |ui| {
-                        self.loop_length_items(ui);
+                    ui.menu_button(format!("loop: {} min", self.lopt.minutes), |ui| {
+                        self.loop_options(ui);
                     });
                 }
             });
     }
 
-    /// The loop-length choices; picking one while the loop plays restarts it.
-    fn loop_length_items(&mut self, ui: &mut Ui) {
-        let mut mins = self.loop_minutes;
-        for m in [10, 15, 30, 60, 120] {
-            ui.selectable_value(&mut mins, m, format!("{m} min"));
-        }
+    /// The loop's settings. They apply while it plays; a new length restarts it.
+    fn loop_options(&mut self, ui: &mut Ui) {
+        let muted = self.cfg.theme.muted;
+        ui.set_min_width(240.0);
+        heading(ui, "LENGTH", muted);
+        let mut mins = self.lopt.minutes;
+        ui.horizontal_wrapped(|ui| {
+            for m in [10, 15, 30, 60, 120] {
+                let txt = if m < 60 { format!("{m} min") } else { format!("{} h", m / 60) };
+                ui.selectable_value(&mut mins, m, txt);
+            }
+        });
         self.set_loop_minutes(ui, mins);
+
+        heading(ui, "SPEED", muted);
+        ui.horizontal(|ui| {
+            for (name, fps) in [("slow", 1.5), ("normal", 2.5), ("fast", 6.0)] {
+                if ui
+                    .selectable_label((self.lopt.fps - fps).abs() < 0.05, name)
+                    .clicked()
+                {
+                    self.lopt.fps = fps;
+                }
+            }
+        });
+        ui.add(
+            egui::Slider::new(&mut self.lopt.fps, 0.5..=12.0)
+                .step_by(0.5)
+                .suffix(" frames/s"),
+        );
+
+        heading(ui, "HOLD THE NEWEST FRAME", muted);
+        ui.add(
+            egui::Slider::new(&mut self.lopt.hold, 0.0..=5.0)
+                .step_by(0.1)
+                .suffix(" s"),
+        );
+
+        ui.add_space(6.0);
+        ui.checkbox(&mut self.lopt.rock, "back and forth")
+            .on_hover_text("play forward, then backward, instead of jumping back to the start");
+        ui.checkbox(&mut self.lopt.rescans, "every SAILS rescan")
+            .on_hover_text("each rescan of the tilt is its own frame; off: one frame per scan");
     }
 
     fn set_loop_minutes(&mut self, ui: &Ui, mins: u32) {
-        if mins != self.loop_minutes {
-            self.loop_minutes = mins;
+        if mins != self.lopt.minutes {
+            self.lopt.minutes = mins;
             if self.anim.is_some() {
                 let now = ui.input(|i| i.time);
                 self.anim = None;
@@ -349,8 +385,8 @@ impl App {
         if ui
             .selectable_label(playing, label)
             .on_hover_text(format!(
-                "play the last {} minutes, every rescan included{}",
-                self.loop_minutes,
+                "play the last {} minutes{}",
+                self.lopt.minutes,
                 self.key_hint(Action::Play)
             ))
             .clicked()
@@ -358,20 +394,14 @@ impl App {
             let now = ui.input(|i| i.time);
             self.toggle_loop(now);
         }
-        // how far back the loop goes (in the "more" menu when the bar is squeezed)
+        // the loop's settings (in the "more" menu when the bar is squeezed)
         if !compact {
-            let mut mins = self.loop_minutes;
-            egui::ComboBox::from_id_salt("loop_minutes")
-                .selected_text(format!("{mins} min"))
-                .width(64.0)
-                .show_ui(ui, |ui| {
-                    for m in [10, 15, 30, 60, 120] {
-                        ui.selectable_value(&mut mins, m, format!("{m} min"));
-                    }
-                })
-                .response
-                .on_hover_text("how far back the loop goes");
-            self.set_loop_minutes(ui, mins);
+            let btn = ui
+                .button(format!("{} min ▾", self.lopt.minutes))
+                .on_hover_text("loop length, speed, hold, back and forth");
+            egui::Popup::menu(&btn)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| self.loop_options(ui));
         }
         let live = RichText::new("● live").color(if self.live { LIVE_RED } else { t.muted });
         if ui
@@ -420,6 +450,16 @@ impl App {
             .on_hover_text(
                 "tornado / severe thunderstorm watches, as dashed county outlines",
             );
+        heading(ui, "READOUT", muted);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("speeds").color(muted).small());
+            for u in crate::config::VelUnits::ALL {
+                ui.selectable_value(&mut self.speed, u, u.label());
+            }
+        })
+        .response
+        .on_hover_text("units for velocity and spectrum width on screen; the colours don't change");
+        ui.checkbox(&mut self.cursor_value, "value next to the cursor");
         self.alert_types_menu(ui);
         self.outlook_menu(ui);
         if let Some(e) = &self.tiles.error {

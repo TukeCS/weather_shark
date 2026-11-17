@@ -333,11 +333,30 @@ impl App {
                         h.x,
                         h.y,
                     ) {
-                        Some(v) if m == Moment::Rho => format!("{v:.3}"),
-                        Some(v) => format!("{v:.1} {}", self.cfg.unit_label(m)),
+                        Some(v) => self.fmt_value(m, v),
                         None => String::new(),
                     },
                 );
+            }
+            // the same value right next to the cursor (every pane: REF and VEL at
+            // the same spot at a glance)
+            if self.cursor_value
+                && rect.contains(p)
+                && let Some(r) = readout.as_ref().filter(|r| !r.is_empty())
+            {
+                let galley = painter.layout_no_wrap(r.clone(), FontId::monospace(12.0), t.fg);
+                let mut at = p + vec2(14.0, -14.0 - galley.size().y);
+                // keep it inside the pane near the right / top edges
+                if at.x + galley.size().x + 8.0 > rect.max.x {
+                    at.x = p.x - 14.0 - galley.size().x;
+                }
+                if at.y - 4.0 < rect.min.y {
+                    at.y = p.y + 14.0;
+                }
+                let plate = Rect::from_min_size(at - vec2(5.0, 3.0), galley.size() + vec2(10.0, 6.0));
+                painter.rect_filled(plate, 4, t.panel.gamma_multiply(0.9));
+                painter.rect_stroke(plate, 4, Stroke::new(1.0, t.line), StrokeKind::Inside);
+                painter.galley(at, galley, t.fg);
             }
         }
 
@@ -481,7 +500,9 @@ impl App {
                     pal.color(v),
                 );
             }
+            // the scale's ends in the units shown on screen
             let fmt = |v: f32| {
+                let v = self.to_display(m, v);
                 if m == Moment::Rho {
                     format!("{v:.2}")
                 } else {
@@ -498,7 +519,7 @@ impl App {
             painter.text(
                 lr.right_top() - vec2(0.0, 3.0),
                 Align2::RIGHT_BOTTOM,
-                format!("{} {}", fmt(hi), self.cfg.unit_label(m)),
+                format!("{} {}", fmt(hi), self.display_unit(m)),
                 small.clone(),
                 t.muted,
             );

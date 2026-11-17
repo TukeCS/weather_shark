@@ -368,6 +368,10 @@ pub struct UiCfg {
     pub header: bool,
     pub legend: bool,
     pub readout: bool,
+    /// show the value next to the cursor too
+    pub cursor_value: bool,
+    /// units for speeds on screen (readout, legend); None = velocity_units
+    pub speed_units: Option<VelUnits>,
     pub crosshair: bool,
     pub toasts: bool,
     /// width of the alerts / radio panel (the Lua editor gets 1.5×)
@@ -392,18 +396,23 @@ pub struct Bookmark {
     pub time: String,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum VelUnits {
     Kt,
     Mph,
+    Kmh,
     Ms,
 }
 
 impl VelUnits {
+    pub const ALL: [VelUnits; 4] = [VelUnits::Kt, VelUnits::Mph, VelUnits::Kmh, VelUnits::Ms];
+
+    /// from m/s
     pub fn factor(self) -> f32 {
         match self {
             VelUnits::Kt => 1.943_844,
             VelUnits::Mph => 2.236_936,
+            VelUnits::Kmh => 3.6,
             VelUnits::Ms => 1.0,
         }
     }
@@ -411,8 +420,18 @@ impl VelUnits {
         match self {
             VelUnits::Kt => "kt",
             VelUnits::Mph => "mph",
+            VelUnits::Kmh => "km/h",
             VelUnits::Ms => "m/s",
         }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "kt" | "kts" | "knots" => VelUnits::Kt,
+            "mph" => VelUnits::Mph,
+            "kmh" | "km/h" | "kph" | "kmph" => VelUnits::Kmh,
+            "ms" | "m/s" => VelUnits::Ms,
+            _ => return None,
+        })
     }
 }
 
@@ -423,9 +442,13 @@ pub struct Config {
     pub refresh_seconds: f64,
     /// follow the radar in real time through the chunks bucket
     pub realtime: bool,
-    /// how far back the loop goes (minutes), and how long each frame shows (s)
+    /// the loop's defaults: how far back (minutes), frames per second, how long
+    /// the newest frame holds (s), back and forth, every SAILS rescan
     pub loop_minutes: u32,
-    pub loop_frame: f64,
+    pub loop_fps: f32,
+    pub loop_hold: f32,
+    pub loop_rock: bool,
+    pub loop_rescans: bool,
     /// draw the rotating sweep line on live data
     pub sweep_line: bool,
     pub tilt: f32,
@@ -699,6 +722,8 @@ impl Config {
             header: sub("ui", "header").bool().unwrap_or(true),
             legend: sub("ui", "legend").bool().unwrap_or(true),
             readout: sub("ui", "readout").bool().unwrap_or(true),
+            cursor_value: sub("ui", "cursor_value").bool().unwrap_or(true),
+            speed_units: sub("ui", "speed_units").str().and_then(VelUnits::parse),
             crosshair: sub("ui", "crosshair").bool().unwrap_or(true),
             toasts: sub("ui", "toasts").bool().unwrap_or(true),
             panel_width: sub("ui", "panel_width")
@@ -848,14 +873,17 @@ impl Config {
             refresh_seconds: pick("refresh_seconds").num().unwrap_or(60.0).max(15.0),
             realtime: pick("realtime").bool().unwrap_or(true),
             loop_minutes: pick("loop_minutes").num().unwrap_or(15.0).clamp(5.0, 180.0) as u32,
-            loop_frame: pick("loop_frame_ms").num().unwrap_or(400.0).clamp(50.0, 5000.0) / 1000.0,
+            loop_fps: (1000.0 / pick("loop_frame_ms").num().unwrap_or(400.0).clamp(50.0, 2000.0))
+                .clamp(0.5, 20.0) as f32,
+            loop_hold: (pick("loop_hold_ms").num().unwrap_or(1600.0).clamp(0.0, 10000.0) / 1000.0) as f32,
+            loop_rock: pick("loop_rock").bool().unwrap_or(false),
+            loop_rescans: pick("loop_rescans").bool().unwrap_or(true),
             sweep_line: pick("sweep_line").bool().unwrap_or(true),
             tilt: pick("tilt").num().unwrap_or(0.5) as f32,
-            vel_units: match pick("velocity_units").str().unwrap_or("kt") {
-                "mph" => VelUnits::Mph,
-                "ms" | "m/s" => VelUnits::Ms,
-                _ => VelUnits::Kt,
-            },
+            vel_units: pick("velocity_units")
+                .str()
+                .and_then(VelUnits::parse)
+                .unwrap_or(VelUnits::Kt),
             panes,
             smooth: pick("smooth").bool().unwrap_or(false),
             view_km: pick("view_km").num().unwrap_or(160.0).clamp(10.0, 2000.0) as f32,
@@ -875,5 +903,32 @@ impl Config {
             outlook,
             bookmarks,
         })
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn speed_units() {
+        assert_eq!(VelUnits::parse("km/h"), Some(VelUnits::Kmh));
+        assert_eq!(VelUnits::parse("KPH"), Some(VelUnits::Kmh));
+        assert_eq!(VelUnits::parse("mph"), Some(VelUnits::Mph));
+        assert_eq!(VelUnits::parse("furlongs"), None);
+        // a 50 kt value in a knots colour table, shown in other units
+        let shown = |u: VelUnits| 50.0 / VelUnits::Kt.factor() * u.factor();
+        assert!((shown(VelUnits::Kmh) - 92.6).abs() < 0.1);
+        assert!((shown(VelUnits::Mph) - 57.5).abs() < 0.1);
+        assert!((shown(VelUnits::Ms) - 25.7).abs() < 0.1);
+        let c = Config::from_lua(
+            r#"return { velocity_units = "kmh", ui = { speed_units = "mph", cursor_value = false } }"#,
+        )
+        .unwrap();
+        assert!(c.vel_units == VelUnits::Kmh);
+        assert!(c.ui.speed_units == Some(VelUnits::Mph));
+        assert!(!c.ui.cursor_value);
+        let d = Config::default_config();
+        assert!(d.ui.cursor_value && d.ui.speed_units == Some(VelUnits::Kt));
     }
 }

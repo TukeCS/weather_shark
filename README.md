@@ -43,7 +43,10 @@ i got tired of paying subscriptions
   colour per risk level, all set in Lua. Watches and warnings each have their own switch
 - NOAA Weather Radio: live streams from the transmitters nearest your radar
 - Step through every SAILS rescan of the low tilt with ◀ ▶ (each pane shows when its scan finished),
-  or loop the last 15 minutes (10 min to 2 h, picked next to the loop button)
+  or loop the last 15 minutes: length (10 min to 2 h), speed, how long the newest frame holds, back and
+  forth, and with or without the rescans, all in the menu next to the loop button
+- The value under the cursor shows in each pane's header and right next to the cursor; speeds in kt,
+  mph, km/h or m/s (map menu)
 - Bookmarks for past events (Moore, El Reno, Joplin, Mayfield, Rolling Fork)
 - Open your own Level II files: drop one on the window, pass it on the command line, or use
   "open file…" in the events menu

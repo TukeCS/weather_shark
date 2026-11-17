@@ -165,8 +165,11 @@ pub struct App {
     /// the loop player, and the scans it's downloading in the background
     anim: Option<Anim>,
     prefetch: HashSet<String>,
-    /// how far back the loop goes (the picker next to "loop")
-    pub(super) loop_minutes: u32,
+    /// the loop's settings (the menu next to "loop")
+    pub(super) lopt: LoopOpts,
+    /// units for speeds on screen, and the value next to the cursor (map menu)
+    pub(super) speed: crate::config::VelUnits,
+    pub(super) cursor_value: bool,
     /// real-time volume coming in from the chunks bucket
     feed: Option<crate::chunks::Stream>,
     /// site whose live chunk folder is being looked up
@@ -333,7 +336,9 @@ impl App {
             frame_on_load: None,
             anim: None,
             prefetch: HashSet::new(),
-            loop_minutes: cfg.loop_minutes,
+            lopt: LoopOpts::from_cfg(&cfg),
+            speed: cfg.ui.speed_units.unwrap_or(cfg.vel_units),
+            cursor_value: cfg.ui.cursor_value,
             feed: None,
             feed_finding: None,
             last_feed_poll: f64::NEG_INFINITY,
@@ -425,7 +430,9 @@ impl App {
                     self.tiles = Tiles::default();
                 }
                 self.show = Toggles::from_cfg(&c);
-                self.loop_minutes = c.loop_minutes;
+                self.lopt = LoopOpts::from_cfg(&c);
+                self.speed = c.ui.speed_units.unwrap_or(c.vel_units);
+                self.cursor_value = c.ui.cursor_value;
                 self.radio.set_volume(c.radio.volume);
                 if !c.radio.enabled {
                     self.stop_radio();
@@ -615,6 +622,34 @@ impl App {
                     generation: self.generation,
                 });
             }
+        }
+    }
+
+    /// A value in the palette's units, in the units shown on screen (speeds can be
+    /// shown in other units than the colour table is written in).
+    pub(super) fn to_display(&self, m: Moment, v: f32) -> f32 {
+        match m {
+            Moment::Vel | Moment::Sw => v / self.cfg.vel_units.factor() * self.speed.factor(),
+            _ => v,
+        }
+    }
+
+    pub(super) fn display_unit(&self, m: Moment) -> &'static str {
+        match m {
+            Moment::Vel | Moment::Sw => self.speed.label(),
+            _ => self.cfg.unit_label(m),
+        }
+    }
+
+    /// "42 kt", "0.97", "55.5 dBZ" …
+    pub(super) fn fmt_value(&self, m: Moment, v: f32) -> String {
+        let v = self.to_display(m, v);
+        match m {
+            Moment::Rho => format!("{v:.3}"),
+            Moment::Vel | Moment::Sw if self.speed != crate::config::VelUnits::Ms => {
+                format!("{v:.0} {}", self.display_unit(m))
+            }
+            _ => format!("{v:.1} {}", self.display_unit(m)),
         }
     }
 
@@ -906,7 +941,7 @@ impl App {
 
     // ---- loop -------------------------------------------------------------------
 
-    /// Play / stop a loop of the scans from the last `loop_minutes` (ending at the
+    /// Play / stop a loop of the scans from the last `lopt.minutes` (ending at the
     /// one on screen), every SAILS rescan included. They download in the background.
     pub(super) fn toggle_loop(&mut self, now: f64) {
         if self.anim.take().is_some() {
@@ -922,7 +957,7 @@ impl App {
             .unwrap_or(self.keys.len() - 1);
         // every scan that started within the window (at least two, at most 40)
         let end_t = net::key_time(&self.keys[end]).unwrap_or(0);
-        let from_t = end_t - self.loop_minutes as i64 * 60;
+        let from_t = end_t - self.lopt.minutes as i64 * 60;
         let mut start = end;
         while start > 0
             && end - start < 39
@@ -943,8 +978,8 @@ impl App {
         self.live = false;
         self.anim = Some(Anim {
             keys,
-            ki: 0,
-            fi: 0,
+            pos: 0,
+            dir: 1,
             next_at: now,
         });
     }
@@ -961,11 +996,20 @@ impl App {
             a.keys.retain(|k| k != key);
             if a.keys.is_empty() {
                 self.anim = None;
-            } else if a.ki >= a.keys.len() {
-                a.ki = 0;
-                a.fi = 0;
+            } else {
+                // the frame list is rebuilt each tick; just start it over
+                a.pos = 0;
             }
         }
+    }
+
+    /// A scan of the loop, if it's downloaded.
+    fn loop_vol(&self, key: &str) -> Option<Arc<Volume>> {
+        self.cache
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .or_else(|| self.scan.as_ref().filter(|s| s.key == key).map(|s| s.vol.clone()))
     }
 
     /// Show the loop's next frame when it's due.
@@ -974,36 +1018,42 @@ impl App {
         if now < a.next_at {
             return;
         }
-        let key = a.keys[a.ki].clone();
-        let vol = self
-            .cache
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| v.clone())
-            .or_else(|| self.scan.as_ref().filter(|s| s.key == key).map(|s| s.vol.clone()));
-        let Some(vol) = vol else {
-            // still downloading: wait for it
-            if let Some(a) = self.anim.as_mut() {
-                a.next_at = now + 0.1;
+        // The frames: every scan downloaded so far (oldest first, stopping at the
+        // first one still on its way), each with its rescans or just its newest
+        // picture. (scan index, frame time; None = the scan's newest)
+        let o = self.lopt;
+        let mut seq: Vec<(usize, Option<f64>)> = Vec::new();
+        let mut vols = Vec::new();
+        for (ki, key) in a.keys.iter().enumerate() {
+            let Some(v) = self.loop_vol(key) else { break };
+            let frames = v.frames(self.tilt);
+            if o.rescans && frames.len() > 1 {
+                let n = frames.len();
+                seq.extend(frames.iter().enumerate().map(|(fi, f)| (ki, (fi + 1 < n).then_some(*f))));
+            } else {
+                seq.push((ki, None));
             }
+            vols.push(v);
+        }
+        let all = vols.len() == a.keys.len();
+        let Some(a) = self.anim.as_mut() else { return };
+        if seq.is_empty() {
+            a.next_at = now + 0.1; // waiting for the first scan
             return;
-        };
-        let frames = vol.frames(self.tilt);
-        let nf = frames.len().max(1);
+        }
+        let len = seq.len();
+        let pos = a.pos.min(len - 1);
+        let (ki, frame) = seq[pos];
+        let key = a.keys[ki].clone();
+        // next frame: hold on the newest, bounce or wrap at the ends
+        let step = 1.0 / o.fps.max(0.1) as f64;
+        let newest = all && pos + 1 == len;
+        a.next_at = now + if newest { (o.hold as f64).max(step) } else { step };
+        (a.pos, a.dir) = next_frame(pos, len, a.dir, o.rock, all);
         self.loading = None;
         self.progress = None;
-        self.show_scan(key, vol);
-        let (frame_ms, hold) = (self.cfg.loop_frame, (self.cfg.loop_frame * 4.0).max(1.2));
-        let Some(a) = self.anim.as_mut() else { return };
-        self.frame = (a.fi + 1 < nf).then(|| frames[a.fi]);
-        let last = a.ki + 1 == a.keys.len() && a.fi + 1 >= nf;
-        a.next_at = now + if last { hold } else { frame_ms };
-        if a.fi + 1 < nf {
-            a.fi += 1;
-        } else {
-            a.fi = 0;
-            a.ki = (a.ki + 1) % a.keys.len();
-        }
+        self.show_scan(key, vols[ki].clone());
+        self.frame = frame;
     }
 
     /// Show a radar file the user opened, centred on its radar.
@@ -1891,9 +1941,77 @@ impl Reveal {
 /// The loop player: which scan and frame comes next, and when.
 struct Anim {
     keys: Vec<String>,
-    ki: usize,
-    fi: usize,
+    /// place in the list of frames, and which way it's going (back and forth)
+    pos: usize,
+    dir: i32,
     next_at: f64,
+}
+
+/// The loop's next frame after `pos` of `len`: bounce at the ends (`rock`) or wrap
+/// to the start, but only once `all` the scans are in; until then it waits on
+/// the last one. Returns (position, direction).
+fn next_frame(pos: usize, len: usize, dir: i32, rock: bool, all: bool) -> (usize, i32) {
+    if rock {
+        let dir = if (pos == 0 && dir < 0) || (pos + 1 >= len && dir > 0) { -dir } else { dir };
+        let to = (pos as i32 + dir).clamp(0, len as i32 - 1) as usize;
+        (to, dir)
+    } else if pos + 1 < len {
+        (pos + 1, dir)
+    } else if all {
+        (0, dir)
+    } else {
+        (pos, dir)
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use super::next_frame;
+
+    fn play(len: usize, rock: bool, steps: usize) -> Vec<usize> {
+        let (mut pos, mut dir) = (0, 1);
+        let mut out = vec![pos];
+        for _ in 0..steps {
+            (pos, dir) = next_frame(pos, len, dir, rock, true);
+            out.push(pos);
+        }
+        out
+    }
+
+    #[test]
+    fn wraps_or_rocks() {
+        assert_eq!(play(3, false, 6), [0, 1, 2, 0, 1, 2, 0]);
+        assert_eq!(play(3, true, 8), [0, 1, 2, 1, 0, 1, 2, 1, 0]);
+        assert_eq!(play(1, true, 3), [0, 0, 0, 0], "one frame doesn't go anywhere");
+        // still downloading: wait on the last frame instead of starting over
+        assert_eq!(next_frame(4, 5, 1, false, false), (4, 1));
+    }
+}
+
+/// How the loop plays.
+#[derive(Clone, Copy)]
+pub(super) struct LoopOpts {
+    pub minutes: u32,
+    /// frames per second
+    pub fps: f32,
+    /// seconds on the newest frame
+    pub hold: f32,
+    /// forward then backward
+    pub rock: bool,
+    /// every SAILS rescan as its own frame
+    pub rescans: bool,
+}
+
+impl LoopOpts {
+    fn from_cfg(c: &Config) -> Self {
+        Self {
+            minutes: c.loop_minutes,
+            fps: c.loop_fps,
+            hold: c.loop_hold,
+            rock: c.loop_rock,
+            rescans: c.loop_rescans,
+        }
+    }
 }
 
 /// Small helper for muted section labels like "ACTIVE WARNINGS".

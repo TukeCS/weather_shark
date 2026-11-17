@@ -37,10 +37,14 @@ return {
     sweep_line      = true,     -- live: a rotating line over the tilt being scanned right now
     loop_minutes    = 15,       -- the loop (P) plays the scans of the last this-many minutes,
                                 -- every SAILS rescan included (also picked next to "loop")
-    loop_frame_ms   = 400,      -- how long each frame of the loop shows (the last one holds longer)
+    loop_frame_ms   = 400,      -- how long each frame of the loop shows (400 = 2.5 frames a second)
+    loop_hold_ms    = 1600,     -- how long the newest frame holds before the loop starts over
+    loop_rock       = false,    -- true: play forward then backward instead of jumping to the start
+    loop_rescans    = true,     -- false: one frame per scan, skipping the SAILS rescans in between
+                                -- (all of these can be changed in the loop menu next to "loop")
     tilt            = 0.5,      -- elevation angle in degrees
     view_km         = 160,      -- how far around the radar to show on start (R resets to this)
-    velocity_units  = "kt",     -- "kt", "mph" or "ms" (the VEL palette below uses these units)
+    velocity_units  = "kt",     -- "kt", "mph", "kmh" or "ms": the units the VEL palette below is in
 
     -- panes to open with. Add more with the n key (or "panes" in the toolbar),
     -- close one with its x (or x over it). Each new pane splits the last one,
@@ -92,7 +96,10 @@ return {
         toolbar   = { "site", "time", "tilt", "map", "events", "alerts", "radio", "lua" },
         header    = true,   -- product picker + title on each pane
         legend    = true,   -- colour scale
-        readout   = true,   -- value under the cursor
+        readout   = true,   -- value under the cursor (in each pane's header)
+        cursor_value = true, -- ...and right next to the cursor in every pane
+        speed_units  = "kt", -- speeds on screen: "kt", "mph", "kmh" or "ms" (also in the map
+                             -- menu). Only the numbers change; colours follow velocity_units
         crosshair = true,   -- linked cursor across panes
         toasts    = true,   -- error messages
         panel_width = 320,  -- alerts / radio side panel (the Lua editor is 1.5× this)
