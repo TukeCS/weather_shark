@@ -407,7 +407,7 @@ mod style_tests {
 
         assert!(Config::from_lua(r#"return { outlook = { show = "tornado", day = 3 } }"#).is_err());
 
-        // tornado rules without a sound get the EAS tone; everything else a beep
+        // tornado rules without a sound get the alarm; everything else a beep
         let cfg = Config::from_lua(
             r#"return { alerts = { rules = {
                 { event = "Tornado Watch" },
@@ -417,13 +417,25 @@ mod style_tests {
         )
         .unwrap();
         let s: Vec<&str> = cfg.alerts.rules.iter().map(|r| r.sound.as_str()).collect();
-        assert_eq!(s, ["eas", "eas", "beep"]);
+        assert_eq!(s, ["alarm", "alarm", "beep"]);
         // and every tornado rule in the default config uses it
         for r in &Config::default_config().alerts.rules {
             if r.event.contains("Tornado") || r.tornado.is_some() {
-                assert_eq!(r.sound, "eas", "{}", r.event);
+                assert_eq!(r.sound, "alarm", "{}", r.event);
             }
         }
         assert!(Config::from_lua(r#"return { outlook = { colors = { MDT = 5 } } }"#).is_err());
+        // your own sounds by name; the removed built-ins still load, as the alarm
+        let cfg = Config::from_lua(
+            r#"return { alerts = { custom_sounds = { Klaxon = "k.wav" }, rules = {
+                { event = "Tornado Warning", sound = "klaxon" },
+                { event = "Tornado Watch", sound = "eas" },
+            } } }"#,
+        )
+        .unwrap();
+        let r = &cfg.alerts.rules;
+        assert_eq!((r[0].sound.as_str(), r[0].file.as_deref()), ("alarm", Some("k.wav")));
+        assert_eq!((r[1].sound.as_str(), r[1].file.as_deref()), ("alarm", None));
+        assert!(Config::from_lua(r#"return { alerts = { rules = { { event = "X", sound = "nope" } } } }"#).is_err());
     }
 }

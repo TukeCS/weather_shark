@@ -198,6 +198,9 @@ pub struct App {
     off_events: HashSet<String>,
     /// search box in the alerts panel (event, area or headline)
     alert_query: String,
+    /// the alert card expanded to its full text, and whether to scroll the list to it
+    alert_open: Option<String>,
+    alert_scroll: bool,
     player: Player,
 
     outlook: Option<crate::spc::Outlook>,
@@ -217,6 +220,12 @@ pub struct App {
     radio_autoplay: bool,
 
     side: Side,
+    /// top bar docked (pushes the map down) or tucked away until pointed at
+    bar_pinned: bool,
+    /// keep the tucked-away bar shown until then (after the pointer leaves it)
+    bar_until: f64,
+    /// where the dropped-down bar was last drawn
+    bar_rect: Option<Rect>,
     site_search: String,
     jump: String,
 }
@@ -357,6 +366,8 @@ impl App {
             hidden: HashSet::new(),
             off_events: HashSet::new(),
             alert_query: String::new(),
+            alert_open: None,
+            alert_scroll: false,
             outlook: None,
             outlook_error: None,
             outlook_asked: None,
@@ -373,6 +384,9 @@ impl App {
             radio_search: String::new(),
             radio_autoplay: false,
             side: Side::None,
+            bar_pinned: !cfg.ui.toolbar_autohide,
+            bar_until: 0.0,
+            bar_rect: None,
             site_search: String::new(),
             jump: String::new(),
             cfg,
@@ -395,6 +409,8 @@ impl App {
             None if app.scan.is_none() && app.live => app.select_site(&site, None),
             None => {}
         }
+        // screenshots always show the bar
+        app.bar_pinned |= app.shot.is_some();
         if let Some((lat, lon)) = app.shot.as_ref().and_then(|s| s.at) {
             app.center = app.map.proj.fwd(lon, lat).to_vec2();
         }
@@ -425,6 +441,9 @@ impl App {
                 }
                 if c.tilt != self.cfg.tilt {
                     self.tilt = c.tilt;
+                }
+                if c.ui.toolbar_autohide != self.cfg.ui.toolbar_autohide {
+                    self.bar_pinned = !c.ui.toolbar_autohide;
                 }
                 if c.map.tiles != self.cfg.map.tiles {
                     self.tiles = Tiles::default();
@@ -1249,6 +1268,13 @@ impl App {
             counties: Vec::new(),
             county_based: false,
             near: true,
+            severity: "Extreme".into(),
+            urgency: "Immediate".into(),
+            certainty: "Observed".into(),
+            sender: "weather_shark".into(),
+            description: "This is a simulated tornado warning, made by the \"simulate\" button to test the map, the list and the alert sounds. It is not a real alert and goes away on its own after three minutes.".into(),
+            instruction: "Nothing to do: this is only a test.".into(),
+            ..Default::default()
         };
         self.simulated.push((al, now + 180.0));
         self.alerts_once = true; // so it sounds even right after startup
@@ -1695,6 +1721,7 @@ impl App {
                     }
                 }
                 Action::Radio => {}
+                Action::Toolbar => self.bar_pinned = !self.bar_pinned,
                 Action::Play => {
                     let now = ui.input(|i| i.time);
                     self.toggle_loop(now);
@@ -1776,49 +1803,7 @@ impl eframe::App for App {
         self.keys_input(ui);
         self.handle_drops(ui);
 
-        egui::Panel::top("top")
-            .exact_size(40.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(t.panel)
-                    .stroke(Stroke::new(1.0, t.line))
-                    .inner_margin(egui::Margin::symmetric(12, 0)),
-            )
-            .show(ui, |ui| {
-                // The widest layout that fit when last measured: each level is
-                // measured as it's drawn, and a narrower one is tried next frame
-                // when it doesn't fit. It still scrolls sideways if even the
-                // narrowest is too wide.
-                let room = ui.available_width();
-                let mut level = 0u8;
-                while level < 2 && self.bar_need[level as usize].is_some_and(|w| w > room) {
-                    level += 1;
-                }
-                let out = egui::ScrollArea::horizontal()
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                    .show(ui, |ui| {
-                        ui.set_height(40.0);
-                        self.top_bar(ui, now, level)
-                    });
-                let need = out.content_size.x;
-                self.bar_need[level as usize] = Some(need);
-                if need > room && level < 2 {
-                    ui.ctx().request_repaint();
-                }
-                // download progress: a thin line along the bottom edge of the bar
-                if self.loading.is_some() {
-                    let full = ui.max_rect().expand2(vec2(12.0, 0.0));
-                    let y = full.max.y;
-                    let f = self.load_fraction().unwrap_or(0.04);
-                    let line = Rect::from_min_max(
-                        pos2(full.min.x, y - 2.0),
-                        pos2(full.min.x + full.width() * f, y),
-                    );
-                    ui.painter()
-                        .with_clip_rect(full.expand(1.0))
-                        .rect_filled(line, 0, t.accent);
-                }
-            });
+        self.top_bars(ui, now);
 
         if self.side != Side::None {
             let width = if self.side == Side::Settings {
@@ -1901,6 +1886,132 @@ impl eframe::App for App {
         if !self.editor_dirty && self.shot.is_none() {
             _storage.set_string(STORE_KEY, self.editor.clone());
         }
+    }
+}
+
+impl App {
+    /// The top bar's contents: the widest layout that fit when last measured (each
+    /// level is measured as it's drawn, and a narrower one is tried next frame when
+    /// it doesn't fit; it still scrolls sideways if even the narrowest is too wide),
+    /// and the download progress along its bottom edge.
+    fn bar_body(&mut self, ui: &mut Ui, now: f64) {
+        let t = self.cfg.theme.clone();
+        let room = ui.available_width();
+        let mut level = 0u8;
+        while level < 2 && self.bar_need[level as usize].is_some_and(|w| w > room) {
+            level += 1;
+        }
+        let out = egui::ScrollArea::horizontal()
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.set_height(40.0);
+                self.top_bar(ui, now, level)
+            });
+        let need = out.content_size.x;
+        self.bar_need[level as usize] = Some(need);
+        if need > room && level < 2 {
+            ui.ctx().request_repaint();
+        }
+        if self.loading.is_some() {
+            let full = ui.max_rect().expand2(vec2(12.0, 0.0));
+            let y = full.max.y;
+            let f = self.load_fraction().unwrap_or(0.04);
+            let line = Rect::from_min_max(
+                pos2(full.min.x, y - 2.0),
+                pos2(full.min.x + full.width() * f, y),
+            );
+            ui.painter()
+                .with_clip_rect(full.expand(1.0))
+                .rect_filled(line, 0, t.accent);
+        }
+    }
+
+    /// The top bar. It's always drawn the same way, floating over the top of the
+    /// window; pinning only changes how much room is kept for it above the map
+    /// (all of it, or a thin strip with a handle), and that change is animated.
+    /// Unpinned, pointing at the strip drops the bar down over the map, and it
+    /// slides away shortly after the pointer leaves it and no menu is open.
+    fn top_bars(&mut self, ui: &mut Ui, now: f64) {
+        const STRIP: f32 = 10.0;
+        const H: f32 = 40.0;
+        let t = self.cfg.theme.clone();
+        let ctx = ui.ctx().clone();
+        let pin = ctx.animate_bool_with_time(egui::Id::NULL.with("bar_pin"), self.bar_pinned, 0.2);
+        let mut strip_hovered = false;
+        egui::Panel::top("top")
+            .exact_size(STRIP + (H - STRIP) * pin)
+            .frame(egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.line)))
+            .show(ui, |ui| {
+                if self.bar_pinned {
+                    return; // the bar covers it
+                }
+                let r = ui.max_rect();
+                let resp = ui.interact(r, egui::Id::NULL.with("top_strip"), egui::Sense::click());
+                strip_hovered = resp.hovered();
+                if resp.clicked() {
+                    self.bar_pinned = true;
+                }
+                // the handle: pulses red while a new alert is fresh, red while a
+                // tornado warning is in effect, and shows the loading progress
+                let handle = Rect::from_center_size(pos2(r.center().x, r.min.y + STRIP / 2.0), vec2(56.0, 4.0));
+                let col = if now < self.alarm_until {
+                    let k = (0.5 + 0.5 * (now * 6.0).sin()) as f32;
+                    Color32::from_rgb(255, (55.0 * k) as u8, (95.0 * k) as u8)
+                } else if self.tornado_total() > 0 {
+                    Color32::from_rgb(255, 69, 95)
+                } else if strip_hovered {
+                    t.accent
+                } else {
+                    t.muted.gamma_multiply(0.6)
+                };
+                let p = ui.painter();
+                p.rect_filled(handle, 2, col);
+                if let Some(f) = self.loading.as_ref().and(self.load_fraction()) {
+                    let done = Rect::from_min_size(handle.min, vec2(handle.width() * f, handle.height()));
+                    p.rect_filled(done, 2, t.accent);
+                }
+            });
+
+        let pointer = ctx.pointer_latest_pos();
+        let over_bar = self
+            .bar_rect
+            .zip(pointer)
+            .is_some_and(|(r, p)| r.expand(4.0).contains(p));
+        // a menu from the bar (site, tilt, map …) keeps it down until it closes
+        let menu_open = self.bar_rect.is_some() && egui::Popup::is_any_open(&ctx);
+        // just unpinned with the pointer on the pin button: it stays put until the
+        // pointer leaves, instead of vanishing under it
+        if self.bar_pinned || strip_hovered || over_bar || menu_open {
+            self.bar_until = now + 0.5;
+        }
+        let dropped =
+            ctx.animate_bool_with_time(egui::Id::NULL.with("bar_drop"), now < self.bar_until, 0.15);
+        if now < self.bar_until + 0.3 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let shown = dropped.max(pin);
+        if shown <= 0.0 {
+            self.bar_rect = None;
+            return;
+        }
+        let screen = ctx.content_rect();
+        // ease out, so it settles gently rather than stopping dead
+        let k = 1.0 - (1.0 - shown).powi(3);
+        let area = egui::Area::new(egui::Id::NULL.with("bar_overlay"))
+            .order(egui::Order::Middle)
+            .fixed_pos(pos2(screen.min.x, screen.min.y - (1.0 - k) * H))
+            .show(&ctx, |ui| {
+                egui::Frame::new()
+                    .fill(t.panel)
+                    .stroke(Stroke::new(1.0, t.line))
+                    .inner_margin(egui::Margin::symmetric(12, 0))
+                    .show(ui, |ui| {
+                        ui.set_width(screen.width() - 24.0);
+                        ui.set_height(H);
+                        self.bar_body(ui, now);
+                    });
+            });
+        self.bar_rect = Some(area.response.rect);
     }
 }
 

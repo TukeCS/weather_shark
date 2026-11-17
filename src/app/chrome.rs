@@ -8,7 +8,8 @@ use crate::net;
 
 #[derive(Clone, Copy)]
 enum CardAction {
-    Focus,
+    /// expand to the full text (and zoom to it) or collapse
+    Toggle,
     Remove,
     Hide,
     Show,
@@ -70,9 +71,6 @@ impl App {
                 t.accent
             };
             ui.painter().circle_filled(r.center(), 4.0, c);
-            if level < 2 {
-                ui.label(RichText::new("weather_shark").strong());
-            }
 
             let items = self.cfg.ui.toolbar.clone();
             let folded = |item: &str| {
@@ -152,7 +150,42 @@ impl App {
                     self.tornado_label(ui);
                 }
             }
+            ui.separator();
+            let hint = if self.bar_pinned {
+                "pinned: click to tuck the bar away until you point at the top edge"
+            } else {
+                "pin the bar so it stays open"
+            };
+            if ui
+                .selectable_label(self.bar_pinned, "pin")
+                .on_hover_text(format!("{hint}{}", self.key_hint(Action::Toolbar)))
+                .clicked()
+            {
+                self.bar_pinned = !self.bar_pinned;
+            }
         });
+    }
+
+    /// A box of fixed width for things whose text changes (scan status, loop
+    /// progress), so the buttons after it never shift.
+    fn slot<R>(ui: &mut Ui, w: f32, f: impl FnOnce(&mut Ui) -> R) -> R {
+        let h = ui.spacing().interact_size.y;
+        ui.allocate_ui_with_layout(
+            vec2(w, h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(vec2(w, h));
+                ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                f(ui)
+            },
+        )
+        .inner
+    }
+
+    /// Width of `s` in the bar's font.
+    fn text_w(ui: &Ui, s: &str) -> f32 {
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        ui.painter().layout_no_wrap(s.into(), font, Color32::WHITE).size().x
     }
 
     /// "TOR n" in red while any tornado warning is in effect in the country.
@@ -315,15 +348,17 @@ impl App {
         });
     }
 
-    /// Scan time, loading progress, ◀ ▶ and the live switch.
+    /// Scan time, its status, ◀ ▶, the loop and the live switch. The status and
+    /// the loop button keep a fixed width, so switching live, loading or stepping
+    /// through SAILS rescans never moves the buttons around them.
     fn time_controls(&mut self, ui: &mut Ui, compact: bool) {
         let t = self.cfg.theme.clone();
+        let mut status: Option<(RichText, String)> = None;
         match &self.scan {
             Some(s) => {
                 let age = net::now() - s.vol.time;
                 // stepping through rescans: the time of the frame on screen
                 let shown = self.frame.map_or(s.vol.time, |t| t as i64);
-                ui.label(net::fmt_time(shown));
                 let tag = if s.key.starts_with("file:") {
                     "file".into()
                 } else if s.key.starts_with("live:") {
@@ -338,29 +373,38 @@ impl App {
                 } else {
                     "archive".into()
                 };
-                let hover = s.key.strip_prefix("file:").unwrap_or(&s.key).to_string();
-                if !compact {
-                    ui.label(RichText::new(tag).color(t.muted))
-                        .on_hover_text(hover);
-                }
+                let source = s.key.strip_prefix("file:").unwrap_or(&s.key).to_string();
+                ui.label(net::fmt_time(shown))
+                    .on_hover_text(format!("{tag} · {source}"));
+                status = Some((RichText::new(tag.clone()).color(t.muted), source));
                 if !self.live
                     && let Some((frames, i)) = self.frame_pos()
                     && frames.len() > 1
                 {
-                    ui.label(RichText::new(format!("SAILS {}/{}", i + 1, frames.len())).color(t.accent))
-                        .on_hover_text("this tilt was scanned several times in this scan (SAILS); ◀ ▶ step through them");
+                    status = Some((
+                        RichText::new(format!("SAILS {}/{}", i + 1, frames.len())).color(t.accent),
+                        format!("{tag}: this tilt was scanned {} times in this scan (SAILS); ◀ ▶ step through them", frames.len()),
+                    ));
                 }
             }
             None => {
                 ui.label(RichText::new("no scan").color(t.muted));
             }
         }
-        if self.loading.is_some() || (self.scan.is_none() && self.error.is_none()) {
-            ui.spinner();
-            if let Some(f) = self.load_fraction() {
-                ui.label(RichText::new(format!("{:.0}%", f * 100.0)).color(t.accent))
-                    .on_hover_text(self.progress_text());
-            }
+        let loading = self.loading.is_some() || (self.scan.is_none() && self.error.is_none());
+        if !compact || loading {
+            let w = Self::text_w(ui, "scanning 19.5°");
+            Self::slot(ui, w, |ui| {
+                if loading {
+                    ui.spinner();
+                    if let Some(f) = self.load_fraction() {
+                        ui.label(RichText::new(format!("{:.0}%", f * 100.0)).color(t.accent))
+                            .on_hover_text(self.progress_text());
+                    }
+                } else if let Some((text, hover)) = status {
+                    ui.add(egui::Label::new(text).truncate()).on_hover_text(hover);
+                }
+            });
         }
         if ui
             .button("◀")
@@ -382,8 +426,9 @@ impl App {
             _ if playing => "■ loop".to_string(),
             _ => "▶ loop".to_string(),
         };
+        let w = Self::text_w(ui, "loop 99/99") + 2.0 * ui.spacing().button_padding.x;
         if ui
-            .selectable_label(playing, label)
+            .add(egui::Button::selectable(playing, label).min_size(vec2(w, 0.0)))
             .on_hover_text(format!(
                 "play the last {} minutes{}",
                 self.lopt.minutes,
@@ -397,8 +442,11 @@ impl App {
         // the loop's settings (in the "more" menu when the bar is squeezed)
         if !compact {
             let btn = ui
-                .button(format!("{} min ▾", self.lopt.minutes))
-                .on_hover_text("loop length, speed, hold, back and forth");
+                .small_button("▾")
+                .on_hover_text(format!(
+                    "loop: {} min · length, speed, hold, back and forth",
+                    self.lopt.minutes
+                ));
             egui::Popup::menu(&btn)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .show(|ui| self.loop_options(ui));
@@ -674,6 +722,12 @@ impl App {
                     self.player.play(s, None, 1, self.cfg.alerts.volume);
                 }
             }
+            // your own sounds (alerts.custom_sounds and the sounds folder)
+            for (name, file) in self.cfg.alerts.custom.clone() {
+                if ui.small_button(&name).on_hover_text(&file).clicked() {
+                    self.player.play("alarm", Some(&file), 1, self.cfg.alerts.volume);
+                }
+            }
         });
         match &self.cfg_error {
             Some(e) => ui.colored_label(ERR, e),
@@ -801,13 +855,19 @@ impl App {
                 }
             }
         });
+        self.alert_scroll = false;
         match action {
-            Some((CardAction::Focus, id)) => {
-                focus = self
-                    .alerts
-                    .iter()
-                    .find(|(a, _)| a.id == id)
-                    .map(|(a, _)| a.polygons.clone());
+            Some((CardAction::Toggle, id)) => {
+                if self.alert_open.as_ref() == Some(&id) {
+                    self.alert_open = None;
+                } else {
+                    focus = self
+                        .alerts
+                        .iter()
+                        .find(|(a, _)| a.id == id)
+                        .map(|(a, _)| a.polygons.clone());
+                    self.alert_open = Some(id);
+                }
             }
             Some((CardAction::Remove, id)) => self.clear_simulated(Some(&id)),
             Some((CardAction::Hide, id)) => {
@@ -833,8 +893,8 @@ impl App {
         }
     }
 
-    /// One alert card. Clicking the card zooms to it; real warnings can be hidden
-    /// (never deleted), simulated ones removed.
+    /// One alert card. Clicking the card opens its full text and zooms to it;
+    /// real warnings can be hidden (never deleted), simulated ones removed.
     fn alert_card(&self, ui: &mut Ui, i: usize, hidden: bool) -> Option<(CardAction, String)> {
         let t = &self.cfg.theme;
         let (al, r) = &self.alerts[i];
@@ -845,6 +905,7 @@ impl App {
             rule_col
         };
         let simulated = al.id.starts_with("simulated-");
+        let open = !hidden && self.alert_open.as_ref() == Some(&al.id);
         let mut out = None;
         // card fills the panel minus its own margin + border, so it can't push the panel wider
         let card_w = ui.available_width() - 22.0;
@@ -852,7 +913,7 @@ impl App {
         let card = ui.scope_builder(egui::UiBuilder::new().id_salt(("alert", &al.id)).sense(Sense::click()), |ui| {
             egui::Frame::new()
                 .fill(if hidden { t.bg } else { t.panel })
-                .stroke(Stroke::new(1.0, t.line))
+                .stroke(Stroke::new(1.0, if open { col.gamma_multiply(0.7) } else { t.line }))
                 .corner_radius(8)
                 .inner_margin(10)
                 .show(ui, |ui| {
@@ -885,6 +946,9 @@ impl App {
                         if !extra.is_empty() {
                             ui.label(RichText::new(extra).color(t.muted).small());
                         }
+                        if open {
+                            self.alert_details(ui, al, col);
+                        }
                     }
                     // actions row: hide / show, and remove for test warnings
                     ui.horizontal(|ui| {
@@ -906,11 +970,111 @@ impl App {
                     });
                 });
         });
-        if out.is_none() && card.response.on_hover_text(&al.headline).clicked() {
-            out = Some((CardAction::Focus, al.id.clone()));
+        if open && self.alert_scroll {
+            card.response.scroll_to_me(Some(egui::Align::TOP));
+        }
+        let hint = if open { "click to close" } else { "click for the full text (and zoom to it)" };
+        if out.is_none() && card.response.on_hover_text(hint).clicked() {
+            out = Some((CardAction::Toggle, al.id.clone()));
         }
         ui.add_space(4.0);
         out
+    }
+
+    /// The full NWS text of an expanded card.
+    fn alert_details(&self, ui: &mut Ui, al: &crate::alerts::Alert, col: Color32) {
+        use crate::alerts::short_time;
+        let t = &self.cfg.theme;
+        ui.add_space(4.0);
+        ui.separator();
+        if !al.headline.is_empty() {
+            ui.label(RichText::new(&al.headline).color(t.fg));
+        }
+        // severity · urgency · certainty, as NWS rates them
+        let rating: Vec<&str> = [&al.severity, &al.urgency, &al.certainty]
+            .into_iter()
+            .map(String::as_str)
+            .filter(|s| !s.is_empty() && *s != "Unknown")
+            .collect();
+        if !rating.is_empty() {
+            ui.label(RichText::new(rating.join(" · ")).color(col).small())
+                .on_hover_text("severity · urgency · certainty, as rated by the NWS");
+        }
+        let mut when = Vec::new();
+        if let Some(s) = short_time(&al.onset) {
+            when.push(format!("from {s}"));
+        }
+        if let Some(s) = short_time(&al.expires) {
+            when.push(format!("until {s}"));
+        }
+        if !when.is_empty() {
+            ui.label(RichText::new(when.join("  ")).color(t.muted).small())
+                .on_hover_text("in the issuing office's local time");
+        }
+        if !al.sender.is_empty() {
+            let issued = short_time(&al.sent).map(|s| format!(", {s}")).unwrap_or_default();
+            ui.label(RichText::new(format!("issued by {}{issued}", al.sender)).color(t.muted).small());
+        }
+        for (title, text) in [("DETAILS", &al.description), ("WHAT TO DO", &al.instruction)] {
+            if text.is_empty() {
+                continue;
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new(title).color(t.muted).small());
+            for para in text.split("\n\n") {
+                ui.label(RichText::new(para).small());
+                ui.add_space(2.0);
+            }
+        }
+        if al.description.is_empty() && al.instruction.is_empty() {
+            ui.label(RichText::new("no further text from the NWS").color(t.muted).small());
+        }
+    }
+
+    /// What's under the pointer on the map: a few lines per alert.
+    pub(super) fn alert_tooltip(&self, ui: &mut Ui, under: &[usize]) {
+        use crate::alerts::short_time;
+        let t = &self.cfg.theme;
+        ui.set_max_width(320.0);
+        for (n, &i) in under.iter().take(4).enumerate() {
+            let (al, r) = &self.alerts[i];
+            let col = self.cfg.alerts.rules[*r].color.to_opaque();
+            if n > 0 {
+                ui.separator();
+            }
+            ui.horizontal_wrapped(|ui| {
+                let (b, _) = ui.allocate_exact_size(vec2(4.0, 16.0), Sense::hover());
+                ui.painter().rect_filled(b, 2, col);
+                ui.label(RichText::new(&al.event).color(col).strong());
+                if let Some(tag) = al.tag() {
+                    ui.label(RichText::new(tag).small().background_color(col.gamma_multiply(0.25)).color(col));
+                }
+                if al.id.starts_with("simulated-") {
+                    ui.label(RichText::new("TEST").small().background_color(t.line).color(t.fg));
+                }
+            });
+            // watches can list dozens of counties
+            let area: String = if al.area.chars().count() > 160 {
+                al.area.chars().take(160).collect::<String>() + "…"
+            } else {
+                al.area.clone()
+            };
+            ui.label(RichText::new(area).small());
+            let mut extra = Vec::new();
+            if let Some(h) = al.hail {
+                extra.push(format!("hail {h:.2}\""));
+            }
+            if let Some(e) = short_time(&al.expires) {
+                extra.push(format!("until {e}"));
+            }
+            if !extra.is_empty() {
+                ui.label(RichText::new(extra.join("  ")).color(t.muted).small());
+            }
+        }
+        if under.len() > 4 {
+            ui.label(RichText::new(format!("+{} more here", under.len() - 4)).color(t.muted).small());
+        }
+        ui.label(RichText::new("click for details").color(t.muted).small().italics());
     }
 
     pub(super) fn radio_panel(&mut self, ui: &mut Ui, now: f64) {

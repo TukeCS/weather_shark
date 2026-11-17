@@ -84,7 +84,7 @@ On Linux, sound goes through PulseAudio/PipeWire when it's running (falling back
 building needs the `libasound` headers. To check your speakers:
 
 ```sh
-weather_shark test-sound eas        # or wea, siren, alarm, beep, chime
+weather_shark test-sound alarm      # or beep, chime, or a .wav / .mp3 file
 weather_shark test-sound radio      # 15 s of the Oklahoma City NOAA Weather Radio stream
 ```
 
@@ -107,6 +107,7 @@ These are the defaults; every one can be changed or turned off in `keys = { ... 
 | X | close the pane under the mouse |
 | M / C / W | toggle roads / city names / warnings |
 | L | follow live |
+| T | pin the top bar / tuck it away (it drops down when you point at the top edge) |
 | R | recentre on the radar (zoom from `view_km`) |
 | O | open a radar file |
 | Space | play / stop the nearest NOAA Weather Radio stream |
@@ -143,12 +144,13 @@ from the map or the list, and `sounds = false` silences everything:
 alerts = {
     radius_km = 300,
     rules = {
-        { event = "Tornado Warning", damage = "catastrophic", sound = "eas",   repeats = 3 },
-        { event = "Tornado Warning", tornado = "observed",    sound = "eas",   repeats = 2 },
-        { event = "Tornado Warning",                          sound = "eas"   },
+        { event = "Tornado Warning", damage = "catastrophic", sound = "alarm", repeats = 6 },
+        { event = "Tornado Warning", tornado = "observed",    sound = "alarm", repeats = 4 },
+        { event = "Tornado Warning",                          sound = "klaxon" },
         { event = "Severe Thunderstorm Warning", hail = 2.0,  sound = "beep"  },
         { event = "Severe Thunderstorm Warning",              file  = "storm.wav" },
     },
+    custom_sounds = { klaxon = "sounds/klaxon.wav" },
 },
 ```
 
@@ -163,10 +165,11 @@ ui     = { toolbar = { "site", "time", "alerts" }, legend = false },
 keys   = { add_pane = "F2", radio = false },
 ```
 
-Built-in sounds are `eas` (the TV / radio Emergency Alert System tone: 853 + 960 Hz for 8 s),
-`wea` (the same tones in the phone alert rhythm: a 2 s tone and two 1 s tones, twice), `siren`,
-`alarm` (2 s of the EAS tone), `beep` and `chime`. `file` plays a
-.wav file next to the config (native only). The global `platform` is `"native"` or `"web"` if you
+Built-in sounds are `alarm` (the two-tone 853 + 960 Hz warning alarm, 2 s), `beep` and `chime`.
+To use your own, drop .wav or .mp3 files into a `sounds` folder next to config.lua and use them by
+name (`sounds/klaxon.wav` is `sound = "klaxon"`), or name them in `alerts.custom_sounds`. They get
+test buttons in the `lua` panel, and if a file can't be played the alarm plays instead. `file` plays
+a sound for just one rule. Custom sounds are native only. The global `platform` is `"native"` or `"web"` if you
 want the two to differ. See [`assets/default_config.lua`](assets/default_config.lua) for every option.
 
 ## NOAA Weather Radio

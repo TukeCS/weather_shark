@@ -305,6 +305,25 @@ impl App {
             );
         }
 
+        // warnings and watches under the pointer: what they are on hover, the full
+        // text in the alerts panel on click
+        if hovered_site.is_none()
+            && !resp.dragged()
+            && let Some(p) = pointer
+        {
+            let under = self.alerts_at(self.to_km(rect, p));
+            if !under.is_empty() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                if resp.clicked() {
+                    let id = self.alerts[under[0]].0.id.clone();
+                    self.alert_open = Some(id);
+                    self.alert_scroll = true;
+                    self.side = super::Side::Alerts;
+                }
+                resp.clone().on_hover_ui_at_pointer(|ui| self.alert_tooltip(ui, &under));
+            }
+        }
+
         // crosshair (shared by all panes)
         let mut readout = None;
         if let Some(h) = self.hover {
@@ -571,6 +590,9 @@ impl App {
             );
         }
 
+        // the pane is clipped to a square, so fill its rounded corners back in with
+        // the background (otherwise radar and map pixels poke out past the border)
+        round_corners(&painter, rect, t.radius, t.bg);
         painter.rect_stroke(
             rect,
             t.radius,
@@ -589,4 +611,34 @@ impl App {
             self.close_pane(idx);
         }
     }
+}
+
+/// Paint `bg` over the parts of `rect` outside its rounded corners: a triangle fan
+/// from each corner point along its quarter circle.
+fn round_corners(painter: &egui::Painter, rect: Rect, radius: f32, bg: Color32) {
+    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+    if r < 1.0 {
+        return;
+    }
+    const STEPS: usize = 8;
+    let mut mesh = egui::Mesh::default();
+    // (corner, centre of its arc, start angle)
+    let corners = [
+        (rect.left_top(), rect.left_top() + vec2(r, r), std::f32::consts::PI),
+        (rect.right_top(), rect.right_top() + vec2(-r, r), 1.5 * std::f32::consts::PI),
+        (rect.right_bottom(), rect.right_bottom() + vec2(-r, -r), 0.0),
+        (rect.left_bottom(), rect.left_bottom() + vec2(r, -r), 0.5 * std::f32::consts::PI),
+    ];
+    for (corner, centre, a0) in corners {
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(corner, bg);
+        for i in 0..=STEPS {
+            let a = a0 + std::f32::consts::FRAC_PI_2 * i as f32 / STEPS as f32;
+            mesh.colored_vertex(centre + r * vec2(a.cos(), a.sin()), bg);
+        }
+        for i in 0..STEPS as u32 {
+            mesh.add_triangle(base, base + 1 + i, base + 2 + i);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }

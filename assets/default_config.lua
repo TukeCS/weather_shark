@@ -94,6 +94,8 @@ return {
         --   "alerts"  warnings list              "radio"  NOAA Weather Radio
         --   "lua"     this file, in an editor
         toolbar   = { "site", "time", "tilt", "map", "events", "alerts", "radio", "lua" },
+        toolbar_autohide = false, -- true: tuck the bar away until you point at the top
+                                  -- edge (the pin button and the toolbar key switch it too)
         header    = true,   -- product picker + title on each pane
         legend    = true,   -- colour scale
         readout   = true,   -- read the value under the cursor
@@ -125,6 +127,7 @@ return {
         open       = "O",       -- open a radar file (you can also drop one on the window)
         radio      = "Space",   -- play / stop the nearest NOAA Weather Radio stream
         play       = "P",       -- play / stop a loop of the last few scans
+        toolbar    = "T",       -- pin the top bar / tuck it away
     },
 
     map = {
@@ -288,12 +291,11 @@ return {
     --   damage   "considerable" (PDS), "catastrophic" (tornado / flash flood
     --            emergency) or "destructive" (severe thunderstorm)
     --   hail     minimum hail size in inches
-    --   sound    "eas"    the TV / radio Emergency Alert System tone (853 + 960 Hz, 8 s)
-    --            "wea"    the phone emergency alert (same tones, 2 s + 1 s + 1 s, twice)
-    --            "siren"  an outdoor warning siren
-    --            "alarm"  2 s of the EAS tone, "beep", "chime", or "none"
-    --            Left out: "eas" for anything with a tornado, "beep" otherwise.
-    --   file     a .wav file to play instead (native only)
+    --   sound    "alarm"  the two-tone warning alarm (853 + 960 Hz, 2 s)
+    --            "beep", "chime", "none", or the name of one of your own sounds
+    --            (see custom_sounds below).
+    --            Left out: "alarm" for anything with a tornado, "beep" otherwise.
+    --   file     a .wav / .mp3 file to play for just this rule (native only)
     --   repeats  how many times to play the sound
     --   volume   0..1
     --   color    outline colour on the map and in the list
@@ -312,13 +314,22 @@ return {
                             -- every alert in the country is drawn on the map and listed
         volume     = 0.8,
         on_startup = false, -- also sound alerts that were already active when the app opened
+        -- Your own sounds (native app; the browser version plays the alarm instead).
+        -- Drop .wav or .mp3 files into a folder called "sounds" next to this file and
+        -- use them by name: sounds/klaxon.wav is sound = "klaxon". Or name them here
+        -- (paths are relative to this file). Try them with the test buttons above.
+        -- If a file can't be played, the alarm plays instead.
+        custom_sounds = {
+            -- klaxon = "sounds/klaxon.wav",
+            -- nwr    = "/home/me/Music/nwr-tone.mp3",
+        },
         rules = {
-            { event = "Tornado Warning", damage = "catastrophic", sound = "eas",   repeats = 3, color = "#ff2dd4" },
-            { event = "Tornado Warning", tornado = "observed",    sound = "eas",   repeats = 2, color = col.red },
-            { event = "Tornado Warning",                          sound = "eas",   color = "#ff6b6b" },
-            { event = "Extreme Wind Warning",                     sound = "eas",   repeats = 3, color = "#ff8c00" },
+            { event = "Tornado Warning", damage = "catastrophic", sound = "alarm", repeats = 6, color = "#ff2dd4" },
+            { event = "Tornado Warning", tornado = "observed",    sound = "alarm", repeats = 4, color = col.red },
+            { event = "Tornado Warning",                          sound = "alarm", repeats = 3, color = "#ff6b6b" },
+            { event = "Extreme Wind Warning",                     sound = "alarm", repeats = 4, color = "#ff8c00" },
             { event = "Severe Thunderstorm Warning", damage = "destructive", sound = "alarm", color = "#ff5e3a" },
-            { event = "Severe Thunderstorm Warning", tornado = "possible", sound = "eas", color = "#ffb347" },
+            { event = "Severe Thunderstorm Warning", tornado = "possible", sound = "alarm", color = "#ffb347" },
             { event = "Severe Thunderstorm Warning", hail = 2.0,  sound = "beep",  color = col.orange },
             { event = "Severe Thunderstorm Warning",              sound = "chime", color = col.yellow },
             { event = "Flash Flood Warning", damage = "catastrophic", sound = "alarm", repeats = 2, color = "#3dffb0" },
@@ -328,7 +339,7 @@ return {
             { event = "Special Marine Warning",                   sound = "none",  color = "#ffa94d" },
 
             -- watches (dashed county outlines; the "watches" switch / A key)
-            { event = "Tornado Watch",                            sound = "eas",   color = "#ff6b6b88" },
+            { event = "Tornado Watch",                            sound = "alarm", color = "#ff6b6b88" },
             { event = "Severe Thunderstorm Watch",                sound = "none",  color = "#ffd60a66" },
             { event = "Flash Flood Watch",                        sound = "none",  color = "#4fd67a66" },
 
@@ -352,7 +363,7 @@ return {
             { event = "High Wind Warning",                        sound = "none",  color = "#daa520" },
             { event = "Red Flag Warning",                         sound = "none",  color = "#ff1493", map = false },
             { event = "Extreme Heat Warning",                     sound = "none",  color = "#c71585", map = false },
-            { event = "Tsunami Warning",                          sound = "eas",   color = "#fd6347" },
+            { event = "Tsunami Warning",                          sound = "alarm", repeats = 3, color = "#fd6347" },
         },
     },
 

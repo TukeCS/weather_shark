@@ -311,6 +311,9 @@ pub struct AlertCfg {
     pub rules: Vec<AlertRule>,
     /// play sounds at all
     pub sounds: bool,
+    /// your own sounds, (name, file): `alerts.custom_sounds` and the files in the
+    /// `sounds` folder next to config.lua. Rules use them by name.
+    pub custom: Vec<(String, String)>,
 }
 
 /// Something you can bind a key to in `keys = { ... }`.
@@ -333,10 +336,11 @@ pub enum Action {
     Open,
     Radio,
     Play,
+    Toolbar,
 }
 
 impl Action {
-    pub const ALL: [(Action, &'static str, &'static str); 17] = [
+    pub const ALL: [(Action, &'static str, &'static str); 18] = [
         (Action::PrevScan, "prev_scan", "ArrowLeft"),
         (Action::NextScan, "next_scan", "ArrowRight"),
         (Action::TiltUp, "tilt_up", "ArrowUp"),
@@ -354,6 +358,7 @@ impl Action {
         (Action::Open, "open", "O"),
         (Action::Radio, "radio", "Space"),
         (Action::Play, "play", "P"),
+        (Action::Toolbar, "toolbar", "T"),
     ];
 }
 
@@ -365,6 +370,8 @@ pub const TOOLBAR_ITEMS: [&str; 9] = [
 pub struct UiCfg {
     /// top bar items, left to right (see TOOLBAR_ITEMS)
     pub toolbar: Vec<String>,
+    /// tuck the top bar away until the pointer reaches the top edge
+    pub toolbar_autohide: bool,
     pub header: bool,
     pub legend: bool,
     pub readout: bool,
@@ -646,6 +653,30 @@ impl Config {
         }
 
         let a = |k: &str| sub("alerts", k);
+        // your own sounds: files dropped in the sounds folder, then the ones named in
+        // alerts.custom_sounds (those win on a clash)
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut custom: Vec<(String, String)> = crate::config_path()
+            .parent()
+            .map(|d| crate::sound::sounds_in(&d.join("sounds")))
+            .unwrap_or_default();
+        #[cfg(target_arch = "wasm32")]
+        let mut custom: Vec<(String, String)> = Vec::new();
+        if let L::Table { map, .. } = r.get("alerts").get("custom_sounds") {
+            for (name, v) in map {
+                let file = v
+                    .str()
+                    .ok_or_else(|| format!("alerts.custom_sounds.{name}: needs a file path"))?;
+                let name = name.to_lowercase();
+                if crate::sound::builtin(&name).is_some() {
+                    return Err(format!(
+                        "alerts.custom_sounds.{name}: that's a built-in sound's name, pick another"
+                    ));
+                }
+                custom.retain(|(n, _)| *n != name);
+                custom.push((name, file.to_string()));
+            }
+        }
         let mut rules = Vec::new();
         let rule_list = if r.get("alerts").get("rules").is_nil() {
             d.get("alerts").get("rules")
@@ -663,22 +694,7 @@ impl Config {
                 tornado: x.get("tornado").str().map(str::to_lowercase),
                 damage: x.get("damage").str().map(str::to_lowercase),
                 hail: x.get("hail").num().map(|v| v as f32),
-                sound: {
-                    // anything to do with tornadoes gets the loudest sound unless told otherwise
-                    let tornado = x.get("tornado").str().is_some()
-                        || x.get("event")
-                            .str()
-                            .is_some_and(|e| e.to_ascii_lowercase().contains("tornado"));
-                    let fallback = if tornado { "eas" } else { "beep" };
-                    let s = x.get("sound").str().unwrap_or(fallback).to_lowercase();
-                    if s != "none" && !crate::sound::SOUNDS.contains(&s.as_str()) {
-                        return Err(format!(
-                            "{what}: unknown sound {s:?} ({}, or \"none\")",
-                            crate::sound::SOUNDS.join(", ")
-                        ));
-                    }
-                    s
-                },
+                sound: String::new(),
                 file: x.get("file").str().map(String::from),
                 repeats: x.get("repeats").num().unwrap_or(1.0).clamp(0.0, 20.0) as u32,
                 volume: x.get("volume").num().unwrap_or(1.0).clamp(0.0, 1.0) as f32,
@@ -686,6 +702,31 @@ impl Config {
                 map: x.get("map").bool().unwrap_or(true),
                 list: x.get("list").bool().unwrap_or(true),
             });
+            // anything to do with tornadoes gets the alarm unless told otherwise
+            let tornado = x.get("tornado").str().is_some()
+                || x.get("event")
+                    .str()
+                    .is_some_and(|e| e.to_ascii_lowercase().contains("tornado"));
+            let fallback = if tornado { "alarm" } else { "beep" };
+            let name = x.get("sound").str().unwrap_or(fallback).to_lowercase();
+            let rule = rules.last_mut().expect("just pushed");
+            rule.sound = if name == "none" {
+                name
+            } else if let Some(b) = crate::sound::builtin(&name) {
+                b.to_string()
+            } else if let Some((_, file)) = custom.iter().find(|(n, _)| *n == name) {
+                // your own sound; the alarm plays if the file can't be
+                rule.file.get_or_insert_with(|| file.clone());
+                "alarm".to_string()
+            } else {
+                let mut names: Vec<&str> = crate::sound::SOUNDS.to_vec();
+                names.extend(custom.iter().map(|(n, _)| n.as_str()));
+                return Err(format!(
+                    "{what}: unknown sound {name:?} ({}, or \"none\"; add your own in \
+                     alerts.custom_sounds or the sounds folder next to config.lua)",
+                    names.join(", ")
+                ));
+            };
         }
         let alerts = AlertCfg {
             enabled: a("enabled").bool().unwrap_or(true),
@@ -694,6 +735,7 @@ impl Config {
             on_startup: a("on_startup").bool().unwrap_or(false),
             rules,
             sounds: a("sounds").bool().unwrap_or(true),
+            custom,
         };
 
         let toolbar: Vec<String> = {
@@ -719,6 +761,7 @@ impl Config {
         }
         let ui = UiCfg {
             toolbar,
+            toolbar_autohide: sub("ui", "toolbar_autohide").bool().unwrap_or(false),
             header: sub("ui", "header").bool().unwrap_or(true),
             legend: sub("ui", "legend").bool().unwrap_or(true),
             readout: sub("ui", "readout").bool().unwrap_or(true),

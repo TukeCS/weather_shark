@@ -10,10 +10,44 @@ fn tone(out: &mut Vec<f32>, secs: f32, mut f: impl FnMut(f32) -> f32) {
     out.extend((0..n).map(|i| f(i as f32 / RATE as f32)));
 }
 
-/// Built-in sound names (anything else plays nothing).
-pub const SOUNDS: [&str; 6] = ["eas", "wea", "siren", "alarm", "beep", "chime"];
+/// Built-in sound names (anything else plays nothing). Your own sounds come from
+/// `alerts.custom_sounds` and the `sounds` folder next to config.lua.
+pub const SOUNDS: [&str; 3] = ["alarm", "beep", "chime"];
 
-/// The EAS / WEA attention signal: 853 Hz and 960 Hz together.
+/// A built-in sound by name, case-insensitive. The sounds that were removed
+/// ("eas", "wea", "siren") play the alarm, so older configs keep working.
+pub fn builtin(name: &str) -> Option<&'static str> {
+    let n = name.to_ascii_lowercase();
+    match n.as_str() {
+        "eas" | "wea" | "siren" => Some("alarm"),
+        _ => SOUNDS.iter().copied().find(|s| *s == n),
+    }
+}
+
+/// Audio files the native player can decode.
+#[cfg(not(target_arch = "wasm32"))]
+pub const FILE_TYPES: [&str; 2] = ["wav", "mp3"];
+
+/// Your own sounds dropped into `dir` (the `sounds` folder next to config.lua),
+/// as (name, path): `klaxon.wav` is the sound "klaxon". Sorted by name.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn sounds_in(dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+            FILE_TYPES.contains(&ext.as_str()).then_some(())?;
+            Some((p.file_stem()?.to_str()?.to_lowercase(), p.display().to_string()))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The alarm: the two-tone 853 + 960 Hz attention signal.
 fn attention(out: &mut Vec<f32>, secs: f32) {
     tone(out, secs, |t| {
         0.4 * ((TAU * 853.0 * t).sin() + (TAU * 960.0 * t).sin()) * env(t, secs)
@@ -29,35 +63,7 @@ fn env(t: f32, len: f32) -> f32 {
 pub fn synth(kind: &str) -> Vec<f32> {
     let mut v = Vec::new();
     match kind {
-        // rising/falling outdoor warning siren
-        "siren" => {
-            let len = 3.0;
-            let mut phase = 0.0f32;
-            tone(&mut v, len, |t| {
-                let f = 520.0 + 560.0 * (0.5 - 0.5 * (TAU * t / 1.5).cos());
-                phase += TAU * f / RATE as f32;
-                let s = phase.sin() + 0.35 * (2.0 * phase).sin() + 0.15 * (3.0 * phase).sin();
-                0.45 * s * env(t, len)
-            });
-        }
-        // Wireless Emergency Alert, the phone one (47 CFR 10.520): a 2 s tone, then two
-        // 1 s tones, 0.5 s apart; the whole pattern twice, 0.5 s between them
-        "wea" => {
-            for rep in 0..2 {
-                if rep > 0 {
-                    tone(&mut v, 0.5, |_| 0.0);
-                }
-                for (i, secs) in [2.0, 1.0, 1.0].into_iter().enumerate() {
-                    if i > 0 {
-                        tone(&mut v, 0.5, |_| 0.0);
-                    }
-                    attention(&mut v, secs);
-                }
-            }
-        }
-        // the TV / radio Emergency Alert System attention signal: 8 s steady (47 CFR 11.31)
-        "eas" => attention(&mut v, 8.0),
-        // a short burst of the same two tones
+        // a 2 s burst of the two-tone attention signal: the main warning sound
         "alarm" => attention(&mut v, 2.0),
         "beep" => {
             for _ in 0..3 {
@@ -248,20 +254,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wea_follows_the_fcc_cadence() {
-        let v = synth("wea");
-        let secs = v.len() as f32 / RATE as f32;
-        // (2 + 0.5 + 1 + 0.5 + 1) × 2 + 0.5
-        assert!((secs - 10.5).abs() < 0.01, "{secs}");
-        let loud = |t: f32| {
-            let i = (t * RATE as f32) as usize;
-            v[i..i + 200].iter().any(|s| s.abs() > 0.1)
-        };
-        assert!(loud(1.0) && !loud(2.2) && loud(3.0) && !loud(3.7) && loud(4.5));
-        assert!(!loud(5.2) && loud(6.5), "second round");
-        assert!((synth("eas").len() as f32 / RATE as f32 - 8.0).abs() < 0.01);
+    fn builtins_and_old_names() {
         for s in SOUNDS {
             assert!(!synth(s).is_empty(), "{s}");
         }
+        assert!((synth("alarm").len() as f32 / RATE as f32 - 2.0).abs() < 0.01);
+        assert_eq!(builtin("EAS"), Some("alarm"), "removed sounds fall back to the alarm");
+        assert_eq!(builtin("chime"), Some("chime"));
+        assert_eq!(builtin("klaxon"), None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn finds_sounds_in_a_folder() {
+        let dir = std::env::temp_dir().join(format!("ws_sounds_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["Klaxon.wav", "horn.mp3", "notes.txt"] {
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        let names: Vec<String> = sounds_in(&dir).into_iter().map(|(n, _)| n).collect();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(names, ["horn", "klaxon"]);
     }
 }

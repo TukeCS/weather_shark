@@ -104,8 +104,8 @@ fn main() -> eframe::Result {
             return Ok(());
         }
         Some("test-sound") => {
-            // `weather_shark test-sound [eas|wea|siren|alarm|beep|chime]` or `test-sound radio [CALLSIGN-mount]`
-            let what = std::env::args().nth(2).unwrap_or_else(|| "eas".into());
+            // `weather_shark test-sound [alarm|beep|chime|FILE]` or `test-sound radio [CALLSIGN-mount]`
+            let what = std::env::args().nth(2).unwrap_or_else(|| "alarm".into());
             if what == "radio" {
                 let mount = std::env::args()
                     .nth(3)
@@ -122,7 +122,11 @@ fn main() -> eframe::Result {
                 }
             } else {
                 let mut p = sound::Player::new();
-                p.play(&what, None, 1, 1.0);
+                // a built-in name, or a sound file to try out
+                match sound::builtin(&what) {
+                    Some(b) => p.play(b, None, 1, 1.0),
+                    None => p.play("alarm", Some(&what), 1, 1.0),
+                }
                 println!("playing {what}…");
                 std::thread::sleep(std::time::Duration::from_secs(4));
             }
@@ -142,7 +146,7 @@ usage:
   weather_shark FILE                       open a NEXRAD Level II file
   weather_shark default-config             print the default config.lua
   weather_shark check [FILE]               validate a config without opening a window
-  weather_shark test-sound [eas|wea|siren|alarm|beep|chime|radio]
+  weather_shark test-sound [alarm|beep|chime|FILE.wav|radio]
   weather_shark screenshot OUT.png [SITE [TIME]] [--panes REF,VEL] [--view KM]
                 [--layout columns] [--at LAT,LON] [--panel lua|alerts|radio] [--simulate]
 

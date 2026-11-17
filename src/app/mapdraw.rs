@@ -311,14 +311,43 @@ impl App {
         }
     }
 
+    /// Whether an alert's outline is on the map (its rule, the event switch, the
+    /// warnings / watches toggles, and not hidden).
+    pub(super) fn alert_on_map(&self, al: &crate::alerts::Alert, r: usize) -> bool {
+        let watch = al.is_watch();
+        self.cfg.alerts.enabled
+            && self.cfg.alerts.rules[r].map
+            && !self.hidden.contains(&al.id)
+            && self.event_on(r)
+            && if watch { self.show.watches } else { self.show.warnings }
+    }
+
+    /// The alerts drawn on the map at a point (km from the radar), most important first.
+    pub(super) fn alerts_at(&self, km: Pos2) -> Vec<usize> {
+        let (lon, lat) = self.map.proj.inv(km);
+        self.alerts
+            .iter()
+            .enumerate()
+            .filter(|(_, (al, r))| {
+                self.alert_on_map(al, *r)
+                    && al.polygons.iter().any(|ring| {
+                        // cheap bounding-box test first: every alert in the country is here
+                        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                        for &(x, y) in ring {
+                            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                        }
+                        (x0..=x1).contains(&lon)
+                            && (y0..=y1).contains(&lat)
+                            && crate::alerts::contains(ring, lon, lat)
+                    })
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     pub(super) fn draw_warnings(&self, painter: &Painter, rect: Rect) {
         for (al, r) in &self.alerts {
-            if !self.cfg.alerts.rules[*r].map || self.hidden.contains(&al.id) || !self.event_on(*r)
-            {
-                continue;
-            }
-            let watch = al.is_watch();
-            if (watch && !self.show.watches) || (!watch && !self.show.warnings) {
+            if !self.alert_on_map(al, *r) {
                 continue;
             }
             let col = self.cfg.alerts.rules[*r].color;

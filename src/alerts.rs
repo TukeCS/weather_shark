@@ -3,13 +3,25 @@
 use crate::config::AlertRule;
 use crate::map::Proj;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Alert {
     pub id: String,
     pub event: String,
     pub headline: String,
     pub area: String,
     pub expires: String,
+    /// When it takes effect / was issued (ISO 8601, the office's local offset).
+    pub onset: String,
+    pub sent: String,
+    /// "Extreme", "Severe" … / "Immediate", "Expected" … / "Observed", "Likely" …
+    pub severity: String,
+    pub urgency: String,
+    pub certainty: String,
+    /// e.g. "NWS Norman OK"
+    pub sender: String,
+    /// The full text, reflowed into paragraphs (NWS hard-wraps at ~70 columns).
+    pub description: String,
+    pub instruction: String,
     pub tornado: Option<String>,
     pub damage: Option<String>,
     pub hail: Option<f32>,
@@ -99,6 +111,41 @@ impl Alert {
     }
 }
 
+/// NWS text is hard-wrapped with blank lines between paragraphs: join each
+/// paragraph's lines so it can wrap to the panel's width.
+pub fn reflow(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .split("\n\n")
+        .map(|para| para.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// "2013-05-20T15:30:00-05:00" → "May 20 15:30" (in the issuing office's time).
+pub fn short_time(iso: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let m: usize = iso.get(5..7)?.parse().ok()?;
+    let d: u32 = iso.get(8..10)?.parse().ok()?;
+    Some(format!("{} {d} {}", MONTHS.get(m.checked_sub(1)?)?, iso.get(11..16)?))
+}
+
+/// Even-odd point-in-polygon on (lon, lat) rings.
+pub fn contains(ring: &[(f64, f64)], lon: f64, lat: f64) -> bool {
+    let mut inside = false;
+    let mut j = ring.len().wrapping_sub(1);
+    for i in 0..ring.len() {
+        let ((xi, yi), (xj, yj)) = (ring[i], ring[j]);
+        if (yi > lat) != (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 fn first_param(p: &serde_json::Value, name: &str) -> Option<String> {
     p.get(name)?.get(0)?.as_str().map(String::from)
 }
@@ -143,6 +190,16 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Alert>, String> {
                 headline: s(p, "headline"),
                 area: s(p, "areaDesc"),
                 expires: s(p, "expires"),
+                onset: Some(s(p, "onset"))
+                    .filter(|x| !x.is_empty())
+                    .unwrap_or_else(|| s(p, "effective")),
+                sent: s(p, "sent"),
+                severity: s(p, "severity"),
+                urgency: s(p, "urgency"),
+                certainty: s(p, "certainty"),
+                sender: s(p, "senderName"),
+                description: reflow(&s(p, "description")),
+                instruction: reflow(&s(p, "instruction")),
                 tornado: first_param(&params, "tornadoDetection"),
                 // tornado: considerable (PDS) / catastrophic (emergency); severe
                 // thunderstorm: considerable / destructive; flash flood: considerable /
@@ -229,6 +286,20 @@ mod tests {
     }
 
     #[test]
+    fn text_helpers() {
+        let t = "...A TORNADO WARNING REMAINS IN EFFECT UNTIL 330 PM\nCDT FOR CLEVELAND COUNTY...\n\nAt 303 PM CDT, a\nconfirmed tornado.\n\n";
+        assert_eq!(
+            reflow(t),
+            "...A TORNADO WARNING REMAINS IN EFFECT UNTIL 330 PM CDT FOR CLEVELAND COUNTY...\n\nAt 303 PM CDT, a confirmed tornado."
+        );
+        assert_eq!(short_time("2013-05-20T15:30:00-05:00").as_deref(), Some("May 20 15:30"));
+        assert_eq!(short_time(""), None);
+        let sq = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)];
+        assert!(contains(&sq, 0.5, 0.5));
+        assert!(!contains(&sq, 1.5, 0.5));
+    }
+
+    #[test]
     fn parses_polygons_and_parameters() {
         let a = parse(SAMPLE.as_bytes()).unwrap();
         assert_eq!(a.len(), 5);
@@ -273,7 +344,7 @@ mod tests {
         assert_eq!(ids[0], "tor-moore");
         let rule = &cfg.alerts.rules[kept[0].1];
         assert_eq!(rule.tornado.as_deref(), Some("observed"));
-        assert_eq!(rule.sound, "eas");
+        assert_eq!(rule.sound, "alarm");
         // 2.5" hail takes the hail rule ahead of the plain severe rule
         let svr = kept.iter().find(|(a, _)| a.id == "svr-1").unwrap();
         assert_eq!(cfg.alerts.rules[svr.1].hail, Some(2.0));
