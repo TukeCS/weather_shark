@@ -163,6 +163,8 @@ pub struct App {
     /// the loop player, and the scans it's downloading in the background
     anim: Option<Anim>,
     prefetch: HashSet<String>,
+    /// how far back the loop goes (the picker next to "loop")
+    pub(super) loop_minutes: u32,
     /// real-time volume coming in from the chunks bucket
     feed: Option<crate::chunks::Stream>,
     /// site whose live chunk folder is being looked up
@@ -328,6 +330,7 @@ impl App {
             frame_on_load: None,
             anim: None,
             prefetch: HashSet::new(),
+            loop_minutes: cfg.loop_minutes,
             feed: None,
             feed_finding: None,
             last_feed_poll: f64::NEG_INFINITY,
@@ -419,6 +422,7 @@ impl App {
                     self.tiles = Tiles::default();
                 }
                 self.show = Toggles::from_cfg(&c);
+                self.loop_minutes = c.loop_minutes;
                 self.radio.set_volume(c.radio.volume);
                 if !c.radio.enabled {
                     self.stop_radio();
@@ -649,7 +653,8 @@ impl App {
         self.cache.retain(|(k, _)| k != key);
         self.cache.push((key.to_string(), vol));
         // room for a whole loop plus a couple to step around
-        if self.cache.len() > self.cfg.loop_scans.max(6) + 2 {
+        let room = self.anim.as_ref().map_or(0, |a| a.keys.len()).max(6) + 2;
+        if self.cache.len() > room {
             self.cache.remove(0);
         }
     }
@@ -898,8 +903,8 @@ impl App {
 
     // ---- loop -------------------------------------------------------------------
 
-    /// Play / stop a loop of the last `loop_scans` scans (ending at the one on
-    /// screen), every SAILS rescan included. The scans download in the background.
+    /// Play / stop a loop of the scans from the last `loop_minutes` (ending at the
+    /// one on screen), every SAILS rescan included. They download in the background.
     pub(super) fn toggle_loop(&mut self, now: f64) {
         if self.anim.take().is_some() {
             return;
@@ -912,8 +917,18 @@ impl App {
             .as_ref()
             .and_then(|s| self.keys.iter().position(|k| *k == s.key))
             .unwrap_or(self.keys.len() - 1);
-        let n = self.cfg.loop_scans.min(end + 1);
-        let keys: Vec<String> = self.keys[end + 1 - n..=end].to_vec();
+        // every scan that started within the window (at least two, at most 40)
+        let end_t = net::key_time(&self.keys[end]).unwrap_or(0);
+        let from_t = end_t - self.loop_minutes as i64 * 60;
+        let mut start = end;
+        while start > 0
+            && end - start < 39
+            && net::key_time(&self.keys[start - 1]).is_some_and(|t| t >= from_t)
+        {
+            start -= 1;
+        }
+        let start = if start == end { end.saturating_sub(1) } else { start };
+        let keys: Vec<String> = self.keys[start..=end].to_vec();
         for k in &keys {
             let have = self.cache.iter().any(|(c, _)| c == k)
                 || self.scan.as_ref().is_some_and(|s| &s.key == k);

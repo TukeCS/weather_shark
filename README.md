@@ -42,6 +42,8 @@ i got tired of paying subscriptions
   hail probabilities (days 4–8: the 15% / 30% severe areas), with the significant (hatched) area dashed. Outline only, filled, or any
   colour per risk level, all set in Lua. Watches and warnings each have their own switch
 - NOAA Weather Radio: live streams from the transmitters nearest your radar
+- Step through every SAILS rescan of the low tilt with ◀ ▶ (each pane shows when its scan finished),
+  or loop the last 15 minutes (10 min to 2 h, picked next to the loop button)
 - Bookmarks for past events (Moore, El Reno, Joplin, Mayfield, Rolling Fork)
 - Open your own Level II files: drop one on the window, pass it on the command line, or use
   "open file…" in the events menu

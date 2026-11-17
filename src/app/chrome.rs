@@ -247,14 +247,34 @@ impl App {
         if ui
             .selectable_label(playing, label)
             .on_hover_text(format!(
-                "play the last {} scans, every rescan included{}",
-                self.cfg.loop_scans,
+                "play the last {} minutes, every rescan included{}",
+                self.loop_minutes,
                 self.key_hint(Action::Play)
             ))
             .clicked()
         {
             let now = ui.input(|i| i.time);
             self.toggle_loop(now);
+        }
+        // how far back the loop goes; changing it while playing restarts the loop
+        let mut mins = self.loop_minutes;
+        egui::ComboBox::from_id_salt("loop_minutes")
+            .selected_text(format!("{mins} min"))
+            .width(64.0)
+            .show_ui(ui, |ui| {
+                for m in [10, 15, 30, 60, 120] {
+                    ui.selectable_value(&mut mins, m, format!("{m} min"));
+                }
+            })
+            .response
+            .on_hover_text("how far back the loop goes");
+        if mins != self.loop_minutes {
+            self.loop_minutes = mins;
+            if playing {
+                let now = ui.input(|i| i.time);
+                self.anim = None;
+                self.toggle_loop(now);
+            }
         }
         let live = RichText::new("● live").color(if self.live { LIVE_RED } else { t.muted });
         if ui

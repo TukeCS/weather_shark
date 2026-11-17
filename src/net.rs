@@ -60,6 +60,22 @@ pub enum Msg {
     },
 }
 
+/// One volume download, kept across resumed attempts.
+struct VolumeDownload {
+    dec: Option<level2::Decoder>,
+    /// bytes of the file decoded so far
+    got: usize,
+    total: Option<usize>,
+    reported: usize,
+    sent_sweeps: usize,
+    /// bytes to drop from a resumed attempt that started over from 0
+    skip: usize,
+    /// attempts in a row that got nothing
+    stuck: u32,
+    /// how long one attempt gets
+    attempt: std::time::Duration,
+}
+
 #[derive(Clone)]
 pub struct Net {
     tx: Sender<Msg>,
@@ -237,28 +253,45 @@ impl Net {
 
     /// Stream a volume: report progress, and hand over the sweeps decoded so far
     /// as they finish (lowest tilt first) so the radar shows up early.
+    ///
+    /// Storm scans are big (10–20 MB) and each attempt only gets `ATTEMPT` to
+    /// arrive, so on a slow link an attempt can run out of time halfway. Then the
+    /// rest is asked for from where it stopped (an HTTP range request) and fed to
+    /// the same decoder. It gives up after a few attempts that get nothing.
     pub fn volume(&self, key: &str) {
-        struct St {
-            dec: Option<level2::Decoder>,
-            got: usize,
-            total: Option<usize>,
-            reported: usize,
-            sent_sweeps: usize,
-        }
+        self.volume_with(key, std::time::Duration::from_secs(60));
+    }
+
+    pub(crate) fn volume_with(&self, key: &str, attempt: std::time::Duration) {
         let url = format!("{BUCKET}/{key}");
-        let me = self.clone();
-        let key = key.to_string();
-        let st = std::sync::Mutex::new(St {
+        let st = Arc::new(std::sync::Mutex::new(VolumeDownload {
             dec: Some(level2::Decoder::new()),
             got: 0,
             total: None,
             reported: 0,
             sent_sweeps: 0,
-        });
-        ehttp::streaming::fetch(ehttp::Request::get(url), move |part| {
+            skip: 0,
+            stuck: 0,
+            attempt,
+        }));
+        Self::volume_from(self.clone(), key.to_string(), url, st);
+    }
+
+    fn volume_from(me: Net, key: String, url: String, st: Arc<std::sync::Mutex<VolumeDownload>>) {
+        const TRIES: u32 = 3;
+        let (from, attempt) = {
+            let g = st.lock().unwrap();
+            (g.got, g.attempt)
+        };
+        let mut req = ehttp::Request::get(&url).with_timeout(Some(attempt));
+        if from > 0 {
+            req.headers.insert("Range", format!("bytes={from}-"));
+        }
+        let (me2, key2, url2, st2) = (me.clone(), key.clone(), url.clone(), st.clone());
+        ehttp::streaming::fetch(req, move |part| {
             use ehttp::streaming::Part;
             use std::ops::ControlFlow;
-            let mut st = st.lock().unwrap();
+            let mut g = st.lock().unwrap();
             let fail = |e: String| {
                 me.send(Msg::Volume {
                     key: key.clone(),
@@ -268,16 +301,35 @@ impl Net {
                 ControlFlow::Break(())
             };
             match part {
-                Err(e) => fail(e),
+                // cut off (timeout, dropped connection): carry on from here
+                Err(e) => {
+                    let progress = g.got > from;
+                    g.stuck = if progress { 0 } else { g.stuck + 1 };
+                    if g.dec.is_some() && g.stuck < TRIES {
+                        log::info!("{key}: resuming at {} bytes ({e})", g.got);
+                        drop(g);
+                        Self::volume_from(me2.clone(), key2.clone(), url2.clone(), st2.clone());
+                        ControlFlow::Break(())
+                    } else {
+                        fail(e)
+                    }
+                }
                 Ok(Part::Response(r)) => {
                     if !r.ok {
                         return fail(format!("download failed: HTTP {}", r.status));
                     }
-                    st.total = r.headers.get("content-length").and_then(|v| v.parse().ok());
+                    let len: Option<usize> =
+                        r.headers.get("content-length").and_then(|v| v.parse().ok());
+                    if from == 0 {
+                        g.total = len;
+                    } else if r.status == 200 {
+                        // the server ignored the range and sent it all again
+                        g.skip = from;
+                    }
                     ControlFlow::Continue(())
                 }
                 Ok(Part::Chunk(c)) if c.is_empty() => {
-                    let vol = st
+                    let vol = g
                         .dec
                         .take()
                         .map_or_else(|| Err("download ended twice".into()), |d| d.finish())
@@ -290,31 +342,34 @@ impl Net {
                     ControlFlow::Break(())
                 }
                 Ok(Part::Chunk(c)) => {
-                    st.got += c.len();
-                    let sent = st.sent_sweeps;
-                    let Some(dec) = st.dec.as_mut() else {
+                    let skip = g.skip.min(c.len());
+                    g.skip -= skip;
+                    let c = &c[skip..];
+                    g.got += c.len();
+                    let sent = g.sent_sweeps;
+                    let Some(dec) = g.dec.as_mut() else {
                         return ControlFlow::Break(());
                     };
-                    if let Err(e) = dec.push(&c) {
+                    if let Err(e) = dec.push(c) {
                         return fail(e);
                     }
                     // Hand over each newly finished sweep among the first few (the low tilts).
                     let done = dec.sweeps_done();
                     let snap = (done > sent && done <= 6).then(|| dec.snapshot()).flatten();
                     if let Some(v) = snap {
-                        st.sent_sweeps = done;
+                        g.sent_sweeps = done;
                         me.send(Msg::Volume {
                             key: key.clone(),
                             vol: Ok(Arc::new(v)),
                             done: false,
                         });
                     }
-                    if st.got - st.reported > 96 * 1024 {
-                        st.reported = st.got;
+                    if g.got - g.reported > 96 * 1024 {
+                        g.reported = g.got;
                         me.send(Msg::Progress {
                             key: key.clone(),
-                            got: st.got,
-                            total: st.total,
+                            got: g.got,
+                            total: g.total,
                         });
                     }
                     ControlFlow::Continue(())

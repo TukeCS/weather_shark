@@ -385,3 +385,33 @@ mod live_tests {
         }
     }
 }
+
+/// A big storm scan with each attempt cut off after 3 s, so it has to resume
+/// several times: `cargo test resumes -- --ignored --nocapture`
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod resume_tests {
+    use crate::net::{Msg, Net};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore]
+    fn resumes_cut_off_downloads() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let net = Net::new(tx, egui::Context::default());
+        let t = Instant::now();
+        net.volume_with("2021/12/11/KPAH/KPAH20211211_032939_V06", Duration::from_secs(3));
+        loop {
+            let msg = rx.recv_timeout(Duration::from_secs(300)).unwrap();
+            if let Msg::Progress { got, total, .. } = &msg {
+                eprintln!("{:>5.1}s {got} / {total:?}", t.elapsed().as_secs_f32());
+            }
+            if let Msg::Volume { vol, done: true, .. } = msg {
+                let v = vol.expect("the whole scan, despite the cut-offs");
+                println!("{} sweeps in {:?}", v.sweeps.len(), t.elapsed());
+                assert_eq!(v.sweeps.len(), 21);
+                assert_eq!(v.frames(0.5).len(), 3, "all three SAILS passes");
+                return;
+            }
+        }
+    }
+}

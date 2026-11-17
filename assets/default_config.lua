@@ -35,7 +35,8 @@ return {
     realtime        = true,     -- live: stream each scan as the radar sends it (seconds behind)
                                 -- instead of waiting for the finished file (5-10 min behind)
     sweep_line      = true,     -- live: a rotating line over the tilt being scanned right now
-    loop_scans      = 6,        -- the loop (P) plays this many scans, every SAILS rescan included
+    loop_minutes    = 15,       -- the loop (P) plays the scans of the last this-many minutes,
+                                -- every SAILS rescan included (also picked next to "loop")
     loop_frame_ms   = 400,      -- how long each frame of the loop shows (the last one holds longer)
     tilt            = 0.5,      -- elevation angle in degrees
     view_km         = 160,      -- how far around the radar to show on start (R resets to this)
