@@ -423,7 +423,7 @@ impl App {
                 t.panel.gamma_multiply(0.82),
             );
 
-            // header: product picker, close button, readout
+            // header: product picker, close button, speed unit
             let head =
                 Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(rect.width() - 20.0, 24.0));
             ui.scope_builder(
@@ -484,14 +484,6 @@ impl App {
                             use crate::config::VelUnits;
                             let i = VelUnits::ALL.iter().position(|u| *u == self.speed).unwrap_or(0);
                             self.speed = VelUnits::ALL[(i + 1) % VelUnits::ALL.len()];
-                        }
-                        if let Some(r) = readout {
-                            let r = if speed {
-                                r.trim_end_matches(self.speed.label()).trim_end().to_string()
-                            } else {
-                                r
-                            };
-                            ui.label(egui::RichText::new(r).color(t.fg));
                         }
                     });
                 },

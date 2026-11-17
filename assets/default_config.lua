@@ -96,8 +96,8 @@ return {
         toolbar   = { "site", "time", "tilt", "map", "events", "alerts", "radio", "lua" },
         header    = true,   -- product picker + title on each pane
         legend    = true,   -- colour scale
-        readout   = true,   -- value under the cursor (in each pane's header)
-        cursor_value = true, -- ...and right next to the cursor in every pane
+        readout   = true,   -- read the value under the cursor
+        cursor_value = true, -- show it right next to the cursor in every pane
         speed_units  = "kt", -- speeds on screen: "kt", "mph", "kmh" or "ms" (also in the map
                              -- menu). Only the numbers change; colours follow velocity_units
         crosshair = true,   -- linked cursor across panes
