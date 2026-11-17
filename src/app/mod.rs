@@ -27,7 +27,10 @@ use crate::sound::Player;
 use crate::tiles::Tiles;
 
 #[cfg(target_arch = "wasm32")]
-const STORE_KEY: &str = "config_lua";
+/// Where the web build keeps a config you edited. Older builds used "config_lua"
+/// and saved their default there on every auto-save, so a tab left open on an old
+/// version kept overwriting it with that version's config; that key is ignored now.
+const STORE_KEY: &str = "weather_shark_config";
 
 struct Scan {
     vol: Arc<Volume>,
