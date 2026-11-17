@@ -150,11 +150,42 @@ pub struct Sweep {
     pub number: u8,
     pub elevation: f32,
     pub radials: Vec<Radial>,
+    /// newest radial, seconds since the Unix epoch
+    pub time: f64,
+    /// how far each product reaches (km; 0 = not in this sweep), worked out once
+    ranges: [f32; 6],
 }
 
 impl Sweep {
+    /// A finished sweep: works out its time and each product's range once, so
+    /// picking the sweep to show every frame is cheap.
+    pub fn new(number: u8, elevation: f32, radials: Vec<Radial>) -> Self {
+        let mut ranges = [0.0f32; 6];
+        let mut time = f64::MIN;
+        for r in &radials {
+            time = time.max(r.time);
+            for (out, g) in ranges.iter_mut().zip(&r.moments) {
+                if let Some(g) = g {
+                    *out = out.max(g.max_range_m() / 1000.0);
+                }
+            }
+        }
+        Self {
+            number,
+            elevation,
+            radials,
+            time,
+            ranges,
+        }
+    }
+
     pub fn has(&self, m: Moment) -> bool {
-        self.radials.iter().take(20).any(|r| r.get(m).is_some())
+        self.ranges[m.index()] > 0.0
+    }
+
+    /// Max range (km) of a product in this sweep.
+    pub fn range_km(&self, m: Moment) -> f32 {
+        self.ranges[m.index()]
     }
 }
 
@@ -193,12 +224,26 @@ impl Volume {
         t
     }
 
-    /// The sweep to show for a moment at a tilt. At split cuts the first sweep
-    /// has the longest-range reflectivity; velocity comes from the Doppler cut.
+    /// The sweep to show for a moment at a tilt: the newest one, so the low tilt
+    /// follows SAILS / MESO-SAILS rescans (every ~1.5–2 min in storms). At split
+    /// cuts the velocity pass also has reflectivity, but only to ~300 km, so only
+    /// sweeps with (nearly) the full range of that product count.
     pub fn sweep_for(&self, m: Moment, tilt: f32) -> Option<&Sweep> {
-        let sweeps = || self.sweeps.iter().map(|s| &**s);
-        sweeps()
-            .find(|s| (s.elevation - tilt).abs() < 0.25 && s.has(m))
+        self.sweep_for_except(m, tilt, None)
+    }
+
+    /// `sweep_for`, leaving out one sweep number (what was on screen before it).
+    pub fn sweep_for_except(&self, m: Moment, tilt: f32, skip: Option<u8>) -> Option<&Sweep> {
+        let sweeps = || {
+            self.sweeps
+                .iter()
+                .map(|s| &**s)
+                .filter(move |s| Some(s.number) != skip && s.has(m))
+        };
+        let at = || sweeps().filter(|s| (s.elevation - tilt).abs() < 0.25);
+        let full = at().map(|s| s.range_km(m)).fold(0.0f32, f32::max);
+        at().filter(|s| s.range_km(m) >= 0.9 * full)
+            .max_by(|a, b| a.time.total_cmp(&b.time))
             .or_else(|| {
                 sweeps().filter(|s| s.has(m)).min_by(|a, b| {
                     (a.elevation - tilt)
@@ -404,11 +449,7 @@ impl Decoder {
                         time: radial.time,
                     });
                     self.cur
-                        .get_or_insert_with(|| Sweep {
-                            number,
-                            elevation: radial.elevation,
-                            radials: Vec::new(),
-                        })
+                        .get_or_insert_with(|| Sweep::new(number, radial.elevation, Vec::new()))
                         .radials
                         .push(radial);
                     // 2 = end of elevation, 4 = end of volume
@@ -424,15 +465,17 @@ impl Decoder {
     }
 
     fn close_sweep(&mut self) {
-        let Some(mut s) = self.cur.take() else { return };
+        let Some(s) = self.cur.take() else { return };
         if s.radials.len() <= 100 {
             return;
         }
-        let n = s.radials.len() as f32;
-        s.elevation = s.radials.iter().map(|r| r.elevation).sum::<f32>() / n;
-        s.radials
-            .sort_by(|a, b| a.azimuth.partial_cmp(&b.azimuth).unwrap());
-        self.vol.sweeps.push(Arc::new(s));
+        let mut radials = s.radials;
+        let n = radials.len() as f32;
+        let elevation = radials.iter().map(|r| r.elevation).sum::<f32>() / n;
+        radials.sort_by(|a, b| a.azimuth.total_cmp(&b.azimuth));
+        self.vol
+            .sweeps
+            .push(Arc::new(Sweep::new(s.number, elevation, radials)));
     }
 
     /// The sweep being decoded right now, radials in the order they were collected.
@@ -523,4 +566,103 @@ fn parse_m31(b: &[u8], vol: &mut Volume) -> Option<(Radial, u8, u8, String)> {
         }
     }
     Some((radial, number, b[21], site))
+}
+
+#[cfg(test)]
+mod sails_tests {
+    use super::*;
+
+    /// A sweep with the given products reaching `km`, collected at time `t`.
+    fn sweep(number: u8, el: f32, t: f64, products: &[(Moment, f32)]) -> Arc<Sweep> {
+        let radials = (0..360)
+            .map(|az| {
+                let mut moments: [Option<Gates>; 6] = Default::default();
+                for &(m, km) in products {
+                    moments[m.index()] = Some(Gates {
+                        first_m: 0.0,
+                        spacing_m: 1000.0,
+                        scale: 2.0,
+                        offset: 66.0,
+                        word16: false,
+                        data: vec![0; km as usize],
+                    });
+                }
+                Radial {
+                    azimuth: az as f32,
+                    time: t,
+                    spacing: 1.0,
+                    elevation: el,
+                    moments,
+                }
+            })
+            .collect();
+        Arc::new(Sweep::new(number, el, radials))
+    }
+
+    #[test]
+    fn newest_full_range_sweep_wins() {
+        use Moment::*;
+        // KPAH, Mayfield 2021, VCP 212 with MESO-SAILS: 0.5° at sweeps 1/2, 7/8, 14/15;
+        // surveillance passes have REF to 460 km + CC, Doppler passes REF/VEL to 300 km
+        let surv = [(Ref, 460.0), (Rho, 300.0)];
+        let dopp = [(Ref, 300.0), (Vel, 300.0)];
+        let mut v = Volume {
+            site: "KPAH".into(),
+            lat: 0.0,
+            lon: 0.0,
+            vcp: 212,
+            time: 0,
+            sweeps: vec![
+                sweep(1, 0.52, 17.0, &surv),
+                sweep(2, 0.53, 38.0, &dopp),
+                sweep(3, 0.88, 56.0, &surv),
+                sweep(4, 0.88, 77.0, &dopp),
+                sweep(7, 0.53, 132.0, &surv),
+                sweep(8, 0.53, 154.0, &dopp),
+            ],
+            antenna: None,
+        };
+        let pick = |v: &Volume, m, t| v.sweep_for(m, t).map(|s| s.number);
+        // the rescan replaces the first 0.5°; REF stays on the long-range pass
+        assert_eq!(pick(&v, Ref, 0.5), Some(7));
+        assert_eq!(pick(&v, Rho, 0.5), Some(7));
+        assert_eq!(pick(&v, Vel, 0.5), Some(8));
+        assert_eq!(pick(&v, Ref, 0.9), Some(3));
+        v.sweeps.push(sweep(14, 0.52, 240.0, &surv));
+        assert_eq!(pick(&v, Ref, 0.5), Some(14));
+        assert_eq!(pick(&v, Vel, 0.5), Some(8), "velocity waits for its own pass");
+        // what was on screen before sweep 14: the previous rescan
+        assert_eq!(v.sweep_for_except(Ref, 0.5, Some(14)).map(|s| s.number), Some(7));
+        assert_eq!(v.sweeps[0].range_km(Ref), 460.0);
+        assert!(!v.sweeps[0].has(Vel));
+    }
+}
+
+#[cfg(test)]
+mod sweep_dump {
+    /// `VOL=path cargo test dump_sweeps -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_sweeps() {
+        let b = std::fs::read(std::env::var("VOL").unwrap()).unwrap();
+        let v = super::parse(&b).unwrap();
+        println!("vcp {}", v.vcp);
+        for s in &v.sweeps {
+            let r = |m| s.range_km(m);
+            let t = s.radials.iter().map(|r| r.time).fold(0.0f64, f64::max) - v.time as f64;
+            println!(
+                "#{:>2} el {:.2} t+{:>3.0}s REF {:>3.0} VEL {:>3.0} CC {:>3.0}",
+                s.number, s.elevation, t, r(super::Moment::Ref), r(super::Moment::Vel), r(super::Moment::Rho)
+            );
+        }
+        use super::Moment::*;
+        let pick = |m, t| v.sweep_for(m, t).map(|s| s.number);
+        println!("0.5°: REF #{:?} VEL #{:?} CC #{:?}", pick(Ref, 0.5), pick(Vel, 0.5), pick(Rho, 0.5));
+        let t = std::time::Instant::now();
+        let mut n = 0u32;
+        for _ in 0..100_000 {
+            n += v.sweep_for(Vel, 0.5).map_or(0, |s| s.number as u32);
+        }
+        println!("sweep_for: {:?} per call ({n})", t.elapsed() / 100_000);
+    }
 }

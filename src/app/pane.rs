@@ -12,7 +12,7 @@ use crate::render;
 impl App {
     /// Rasterize one sweep of one product into a texture (and its range in km).
     fn upload(&self, ctx: &egui::Context, name: String, sweep: &Sweep, m: Moment) -> (egui::TextureHandle, f32) {
-        let range = render::range_km(sweep, m).clamp(50.0, 470.0);
+        let range = sweep.range_km(m).clamp(50.0, 470.0);
         let img = render::rasterize(
             sweep,
             m,
@@ -30,8 +30,14 @@ impl App {
     }
 
     fn texture(&mut self, ctx: &egui::Context, m: Moment) -> Option<(egui::TextureHandle, f32)> {
+        let n = self.scan.as_ref()?.vol.sweep_for(m, self.tilt)?.number;
+        self.sweep_texture(ctx, m, n)
+    }
+
+    /// The image of one sweep (by number) of the scan on screen.
+    fn sweep_texture(&mut self, ctx: &egui::Context, m: Moment, n: u8) -> Option<(egui::TextureHandle, f32)> {
         let scan = self.scan.as_ref()?;
-        let sweep = scan.vol.sweep_for(m, self.tilt)?;
+        let sweep = scan.vol.sweeps.iter().find(|s| s.number == n && s.has(m))?;
         let key = (scan.generation, sweep.number, m, false);
         if let Some(t) = self.textures.get(&key) {
             return Some(t.clone());
@@ -41,14 +47,26 @@ impl App {
         Some(t)
     }
 
-    /// The previous volume's image of a tilt, shown under it while it's swept in.
+    /// What was on screen for this tilt before sweep `number` started, shown under
+    /// it while it's swept in: an earlier scan of the same tilt (SAILS rescans
+    /// come several times a volume), or else the previous volume's.
     fn old_texture(
         &mut self,
         ctx: &egui::Context,
         m: Moment,
         number: u8,
     ) -> Option<(egui::TextureHandle, f32)> {
-        let generation = self.scan.as_ref()?.generation;
+        let scan = self.scan.as_ref()?;
+        let el = scan.vol.sweeps.iter().find(|s| s.number == number)?.elevation;
+        if let Some(prev) = scan
+            .vol
+            .sweep_for_except(m, el, Some(number))
+            .filter(|s| (s.elevation - el).abs() < 0.25)
+            .map(|s| s.number)
+        {
+            return self.sweep_texture(ctx, m, prev);
+        }
+        let generation = scan.generation;
         let key = (generation, number, m, true);
         if let Some(t) = self.textures.get(&key) {
             return Some(t.clone());

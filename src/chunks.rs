@@ -257,11 +257,10 @@ fn merge(cur: &Sweep, old: Option<&Sweep>) -> Sweep {
         );
     }
     radials.sort_by(|a, b| a.azimuth.total_cmp(&b.azimuth));
-    Sweep {
-        number: cur.number,
-        elevation,
-        radials,
-    }
+    let mut s = Sweep::new(cur.number, elevation, radials);
+    // it's as new as its newest radial, not the old ones filling in
+    s.time = cur.radials.iter().map(|r| r.time).fold(f64::MIN, f64::max);
+    s
 }
 
 /// "20261117-123456" → epoch seconds
@@ -309,16 +308,12 @@ mod tests {
     #[test]
     fn new_radials_replace_old_only_where_scanned() {
         // scanned from 350° clockwise round to 20°
-        let cur = Sweep {
-            number: 1,
-            elevation: 0.5,
-            radials: (0..31).map(|i| radial((350 + i) as f32 % 360.0, i as f64)).collect(),
-        };
-        let old = Sweep {
-            number: 1,
-            elevation: 0.5,
-            radials: (0..360).map(|i| radial(i as f32, -100.0)).collect(),
-        };
+        let cur = Sweep::new(
+            1,
+            0.5,
+            (0..31).map(|i| radial((350 + i) as f32 % 360.0, i as f64)).collect(),
+        );
+        let old = Sweep::new(1, 0.5, (0..360).map(|i| radial(i as f32, -100.0)).collect());
         let m = merge(&cur, Some(&old));
         let new_at = |az: f32| {
             m.radials

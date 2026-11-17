@@ -19,16 +19,6 @@ fn az_table(s: &Sweep) -> Vec<u16> {
     t
 }
 
-/// Max range (km) of a moment in a sweep.
-pub fn range_km(s: &Sweep, m: Moment) -> f32 {
-    s.radials
-        .iter()
-        .filter_map(|r| r.get(m))
-        .map(|g| g.max_range_m())
-        .fold(0.0, f32::max)
-        / 1000.0
-}
-
 /// Rasterize to a `size`×`size` image spanning ±`range` km.
 /// `factor` converts native units to the palette's units (m/s -> kt etc).
 pub fn rasterize(
