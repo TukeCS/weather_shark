@@ -35,6 +35,8 @@ return {
     realtime        = true,     -- live: stream each scan as the radar sends it (seconds behind)
                                 -- instead of waiting for the finished file (5-10 min behind)
     sweep_line      = true,     -- live: a rotating line over the tilt being scanned right now
+    loop_scans      = 6,        -- the loop (P) plays this many scans, every SAILS rescan included
+    loop_frame_ms   = 400,      -- how long each frame of the loop shows (the last one holds longer)
     tilt            = 0.5,      -- elevation angle in degrees
     view_km         = 160,      -- how far around the radar to show on start (R resets to this)
     velocity_units  = "kt",     -- "kt", "mph" or "ms" (the VEL palette below uses these units)
@@ -114,6 +116,7 @@ return {
         settings   = "Comma",   -- open this file in the editor
         open       = "O",       -- open a radar file (you can also drop one on the window)
         radio      = "Space",   -- play / stop the nearest NOAA Weather Radio stream
+        play       = "P",       -- play / stop a loop of the last few scans
     },
 
     map = {

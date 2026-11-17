@@ -212,6 +212,27 @@ pub struct Antenna {
 }
 
 impl Volume {
+    /// When each pass over a tilt finished, oldest first. A SAILS volume scans the
+    /// low tilt several times; the reflectivity + velocity pair of one pass (a few
+    /// seconds apart) counts once.
+    pub fn frames(&self, tilt: f32) -> Vec<f64> {
+        let mut t: Vec<f64> = self
+            .sweeps
+            .iter()
+            .filter(|s| (s.elevation - tilt).abs() < 0.25)
+            .map(|s| s.time)
+            .collect();
+        t.sort_by(f64::total_cmp);
+        let mut out: Vec<f64> = Vec::new();
+        for x in t {
+            match out.last_mut() {
+                Some(last) if x - *last < 60.0 => *last = x,
+                _ => out.push(x),
+            }
+        }
+        out
+    }
+
     /// Distinct elevation angles (rounded to 0.1°), lowest first.
     pub fn tilts(&self) -> Vec<f32> {
         let mut t: Vec<f32> = self
@@ -228,12 +249,23 @@ impl Volume {
     /// follows SAILS / MESO-SAILS rescans (every ~1.5–2 min in storms). At split
     /// cuts the velocity pass also has reflectivity, but only to ~300 km, so only
     /// sweeps with (nearly) the full range of that product count.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn sweep_for(&self, m: Moment, tilt: f32) -> Option<&Sweep> {
-        self.sweep_for_except(m, tilt, None)
+        self.pick(m, tilt, None, None)
+    }
+
+    /// `sweep_for` as it was at time `until` (seconds since the epoch): the newest
+    /// scan of the tilt finished by then, or the first one if none was.
+    pub fn sweep_at(&self, m: Moment, tilt: f32, until: Option<f64>) -> Option<&Sweep> {
+        self.pick(m, tilt, None, until)
     }
 
     /// `sweep_for`, leaving out one sweep number (what was on screen before it).
     pub fn sweep_for_except(&self, m: Moment, tilt: f32, skip: Option<u8>) -> Option<&Sweep> {
+        self.pick(m, tilt, skip, None)
+    }
+
+    fn pick(&self, m: Moment, tilt: f32, skip: Option<u8>, until: Option<f64>) -> Option<&Sweep> {
         let sweeps = || {
             self.sweeps
                 .iter()
@@ -242,8 +274,12 @@ impl Volume {
         };
         let at = || sweeps().filter(|s| (s.elevation - tilt).abs() < 0.25);
         let full = at().map(|s| s.range_km(m)).fold(0.0f32, f32::max);
-        at().filter(|s| s.range_km(m) >= 0.9 * full)
-            .max_by(|a, b| a.time.total_cmp(&b.time))
+        let good = || at().filter(move |s| s.range_km(m) >= 0.9 * full);
+        let by_time = |a: &&Sweep, b: &&Sweep| a.time.total_cmp(&b.time);
+        good()
+            .filter(|s| until.is_none_or(|u| s.time <= u + 0.5))
+            .max_by(by_time)
+            .or_else(|| good().min_by(by_time))
             .or_else(|| {
                 sweeps().filter(|s| s.has(m)).min_by(|a, b| {
                     (a.elevation - tilt)
@@ -633,6 +669,17 @@ mod sails_tests {
         assert_eq!(pick(&v, Vel, 0.5), Some(8), "velocity waits for its own pass");
         // what was on screen before sweep 14: the previous rescan
         assert_eq!(v.sweep_for_except(Ref, 0.5, Some(14)).map(|s| s.number), Some(7));
+        // three passes over 0.5° (each a REF + VEL pair), one over 0.9°
+        assert_eq!(v.frames(0.5), vec![38.0, 154.0, 240.0]);
+        assert_eq!(v.frames(0.9), vec![77.0]);
+        // stepping back in time: each pane shows what it had at that moment
+        let at = |m, t| v.sweep_at(m, 0.5, Some(t)).map(|s| s.number);
+        assert_eq!(at(Ref, 38.0), Some(1));
+        assert_eq!(at(Vel, 38.0), Some(2));
+        assert_eq!(at(Ref, 154.0), Some(7));
+        assert_eq!(at(Vel, 154.0), Some(8));
+        assert_eq!(at(Vel, 240.0), Some(8));
+        assert_eq!(at(Ref, 0.0), Some(1), "nothing that early: the first scan");
         assert_eq!(v.sweeps[0].range_km(Ref), 460.0);
         assert!(!v.sweeps[0].has(Vel));
     }
@@ -658,6 +705,10 @@ mod sweep_dump {
         use super::Moment::*;
         let pick = |m, t| v.sweep_for(m, t).map(|s| s.number);
         println!("0.5°: REF #{:?} VEL #{:?} CC #{:?}", pick(Ref, 0.5), pick(Vel, 0.5), pick(Rho, 0.5));
+        for f in v.frames(0.5) {
+            let at = |m| v.sweep_at(m, 0.5, Some(f)).map(|s| s.number);
+            println!("frame {}: REF #{:?} VEL #{:?}", crate::net::fmt_clock(f), at(Ref), at(Vel));
+        }
         let t = std::time::Instant::now();
         let mut n = 0u32;
         for _ in 0..100_000 {

@@ -332,10 +332,11 @@ pub enum Action {
     Settings,
     Open,
     Radio,
+    Play,
 }
 
 impl Action {
-    pub const ALL: [(Action, &'static str, &'static str); 16] = [
+    pub const ALL: [(Action, &'static str, &'static str); 17] = [
         (Action::PrevScan, "prev_scan", "ArrowLeft"),
         (Action::NextScan, "next_scan", "ArrowRight"),
         (Action::TiltUp, "tilt_up", "ArrowUp"),
@@ -352,6 +353,7 @@ impl Action {
         (Action::Settings, "settings", "Comma"),
         (Action::Open, "open", "O"),
         (Action::Radio, "radio", "Space"),
+        (Action::Play, "play", "P"),
     ];
 }
 
@@ -421,6 +423,9 @@ pub struct Config {
     pub refresh_seconds: f64,
     /// follow the radar in real time through the chunks bucket
     pub realtime: bool,
+    /// how many scans the loop plays, and how long each frame shows (s)
+    pub loop_scans: usize,
+    pub loop_frame: f64,
     /// draw the rotating sweep line on live data
     pub sweep_line: bool,
     pub tilt: f32,
@@ -842,6 +847,8 @@ impl Config {
             live: pick("live").bool().unwrap_or(true),
             refresh_seconds: pick("refresh_seconds").num().unwrap_or(60.0).max(15.0),
             realtime: pick("realtime").bool().unwrap_or(true),
+            loop_scans: pick("loop_scans").num().unwrap_or(6.0).clamp(2.0, 20.0) as usize,
+            loop_frame: pick("loop_frame_ms").num().unwrap_or(400.0).clamp(50.0, 5000.0) / 1000.0,
             sweep_line: pick("sweep_line").bool().unwrap_or(true),
             tilt: pick("tilt").num().unwrap_or(0.5) as f32,
             vel_units: match pick("velocity_units").str().unwrap_or("kt") {

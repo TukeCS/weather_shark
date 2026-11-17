@@ -30,7 +30,7 @@ impl App {
     }
 
     fn texture(&mut self, ctx: &egui::Context, m: Moment) -> Option<(egui::TextureHandle, f32)> {
-        let n = self.scan.as_ref()?.vol.sweep_for(m, self.tilt)?.number;
+        let n = self.shown(&self.scan.as_ref()?.vol, m)?.number;
         self.sweep_texture(ctx, m, n)
     }
 
@@ -199,7 +199,7 @@ impl App {
         let shown = self
             .scan
             .as_ref()
-            .and_then(|s| s.vol.sweep_for(m, self.tilt))
+            .and_then(|s| self.shown(&s.vol, m))
             .map(|s| s.number);
         let reveal = shown.and_then(|n| Some((n, self.reveal(n, now)?)));
         let full = |s: &Self, tex: &egui::TextureHandle, range: f32| {
@@ -322,7 +322,7 @@ impl App {
             }
             if let Some(scan) = &self.scan
                 && self.cfg.ui.readout
-                && let Some(sw) = scan.vol.sweep_for(m, self.tilt)
+                && let Some(sw) = self.shown(&scan.vol, m)
             {
                 readout = Some(
                     match render::sample(
@@ -427,13 +427,19 @@ impl App {
                         });
                     self.panes[idx].moment = sel;
                     if rect.width() > 360.0 {
-                        let elev = self
+                        // tilt and when this exact sweep finished (SAILS rescans
+                        // make it differ from the scan's start time)
+                        let sweep = self
                             .scan
                             .as_ref()
-                            .and_then(|s| s.vol.sweep_for(m, self.tilt))
-                            .map(|s| s.elevation);
-                        let sub = match elev {
-                            Some(e) => format!("{} · {e:.1}°", m.title()),
+                            .and_then(|s| self.shown(&s.vol, m))
+                            .map(|s| (s.elevation, s.time));
+                        let sub = match sweep {
+                            Some((e, t)) => format!(
+                                "{} · {e:.1}° · {}",
+                                m.title(),
+                                crate::net::fmt_clock(t)
+                            ),
                             None => m.title().to_string(),
                         };
                         ui.label(egui::RichText::new(sub).color(t.muted).small());

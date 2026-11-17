@@ -551,6 +551,12 @@ pub fn fmt_time(t: i64) -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}Z", s / 3600, s / 60 % 60)
 }
 
+/// "03:33:59Z"
+pub fn fmt_clock(t: f64) -> String {
+    let s = (t as i64).rem_euclid(86400);
+    format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60)
+}
+
 pub fn fmt_age(secs: i64) -> String {
     match secs {
         s if s < 90 => "just now".into(),

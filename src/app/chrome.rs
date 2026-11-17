@@ -185,7 +185,9 @@ impl App {
         match &self.scan {
             Some(s) => {
                 let age = net::now() - s.vol.time;
-                ui.label(net::fmt_time(s.vol.time));
+                // stepping through rescans: the time of the frame on screen
+                let shown = self.frame.map_or(s.vol.time, |t| t as i64);
+                ui.label(net::fmt_time(shown));
                 let tag = if s.key.starts_with("file:") {
                     "file".into()
                 } else if s.key.starts_with("live:") {
@@ -203,6 +205,13 @@ impl App {
                 let hover = s.key.strip_prefix("file:").unwrap_or(&s.key).to_string();
                 ui.label(RichText::new(tag).color(t.muted))
                     .on_hover_text(hover);
+                if !self.live
+                    && let Some((frames, i)) = self.frame_pos()
+                    && frames.len() > 1
+                {
+                    ui.label(RichText::new(format!("SAILS {}/{}", i + 1, frames.len())).color(t.accent))
+                        .on_hover_text("this tilt was scanned several times in this scan (SAILS); ◀ ▶ step through them");
+                }
             }
             None => {
                 ui.label(RichText::new("no scan").color(t.muted));
@@ -228,6 +237,24 @@ impl App {
             .clicked()
         {
             self.step(1);
+        }
+        let playing = self.anim.is_some();
+        let label = match self.loop_ready() {
+            Some((have, n)) if have < n => format!("loop {have}/{n}"),
+            _ if playing => "■ loop".to_string(),
+            _ => "▶ loop".to_string(),
+        };
+        if ui
+            .selectable_label(playing, label)
+            .on_hover_text(format!(
+                "play the last {} scans, every rescan included{}",
+                self.cfg.loop_scans,
+                self.key_hint(Action::Play)
+            ))
+            .clicked()
+        {
+            let now = ui.input(|i| i.time);
+            self.toggle_loop(now);
         }
         let live = RichText::new("● live").color(if self.live { LIVE_RED } else { t.muted });
         if ui

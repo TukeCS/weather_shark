@@ -155,6 +155,14 @@ pub struct App {
     /// Once the user pans or zooms, stop auto-fitting the view to the window.
     user_moved: bool,
 
+    /// the moment being shown inside the scan (SAILS rescans); None = its newest
+    frame: Option<f64>,
+    /// the next scan to show should start at its first frame (stepping forward)
+    /// or its last (stepping back)
+    frame_on_load: Option<bool>,
+    /// the loop player, and the scans it's downloading in the background
+    anim: Option<Anim>,
+    prefetch: HashSet<String>,
     /// real-time volume coming in from the chunks bucket
     feed: Option<crate::chunks::Stream>,
     /// site whose live chunk folder is being looked up
@@ -316,6 +324,10 @@ impl App {
             hover: None,
             fitted: false,
             user_moved: false,
+            frame: None,
+            frame_on_load: None,
+            anim: None,
+            prefetch: HashSet::new(),
             feed: None,
             feed_finding: None,
             last_feed_poll: f64::NEG_INFINITY,
@@ -508,6 +520,9 @@ impl App {
 
     fn select_site(&mut self, id: &str, target: Option<i64>) {
         let id = id.to_uppercase();
+        self.anim = None;
+        self.frame = None;
+        self.frame_on_load = None;
         if let Some(s) = self.sites.iter().find(|s| s.id == id) {
             self.map.recenter(s.lat, s.lon);
         }
@@ -582,6 +597,11 @@ impl App {
             _ => {
                 self.generation += 1;
                 self.textures.clear();
+                // a new scan starts at its newest frame, or its first when stepping forward
+                self.frame = match self.frame_on_load.take() {
+                    Some(true) => vol.frames(self.tilt).first().copied(),
+                    _ => None,
+                };
                 self.scan = Some(Scan {
                     vol,
                     key,
@@ -589,6 +609,21 @@ impl App {
                 });
             }
         }
+    }
+
+    /// The sweep a pane of product `m` shows: at the chosen tilt, as of the frame.
+    pub(super) fn shown<'a>(&self, vol: &'a Volume, m: Moment) -> Option<&'a crate::level2::Sweep> {
+        vol.sweep_at(m, self.tilt, self.frame)
+    }
+
+    /// The frames (pass end times) of the scan on screen at this tilt, and which is shown.
+    pub(super) fn frame_pos(&self) -> Option<(Vec<f64>, usize)> {
+        let frames = self.scan.as_ref()?.vol.frames(self.tilt);
+        let i = match self.frame {
+            Some(t) => frames.iter().rposition(|f| *f <= t + 0.5).unwrap_or(0),
+            None => frames.len().checked_sub(1)?,
+        };
+        Some((frames, i))
     }
 
     /// 0..1 while a scan downloads (None if the size isn't known yet).
@@ -613,7 +648,8 @@ impl App {
     fn cache_put(&mut self, key: &str, vol: Arc<Volume>) {
         self.cache.retain(|(k, _)| k != key);
         self.cache.push((key.to_string(), vol));
-        if self.cache.len() > 6 {
+        // room for a whole loop plus a couple to step around
+        if self.cache.len() > self.cfg.loop_scans.max(6) + 2 {
             self.cache.remove(0);
         }
     }
@@ -766,6 +802,8 @@ impl App {
 
     /// Put the live volume on screen. Only the images of sweeps that changed are redrawn.
     fn show_feed(&mut self, now: f64) {
+        // live always shows the newest of everything
+        self.frame = None;
         let Some(f) = self.feed.as_mut() else { return };
         let dirty = std::mem::take(&mut f.dirty);
         let Some(vol) = f.composite() else { return };
@@ -828,6 +866,17 @@ impl App {
             return;
         };
         self.live = false;
+        self.anim = None;
+        // through the rescans of this scan first, then on to the next scan
+        if let Some((frames, i)) = self.frame_pos() {
+            let j = i as i32 + dir;
+            if j >= 0 && (j as usize) < frames.len() {
+                let j = j as usize;
+                self.frame = (j + 1 < frames.len()).then(|| frames[j]);
+                return;
+            }
+        }
+        self.frame_on_load = Some(dir > 0);
         // the live volume comes after every archived one
         let pos = if cur.starts_with("live:") {
             self.keys.len()
@@ -844,6 +893,98 @@ impl App {
                 self.target = Some(t - 1);
                 self.list(t.div_euclid(86400) - 1);
             }
+        }
+    }
+
+    // ---- loop -------------------------------------------------------------------
+
+    /// Play / stop a loop of the last `loop_scans` scans (ending at the one on
+    /// screen), every SAILS rescan included. The scans download in the background.
+    pub(super) fn toggle_loop(&mut self, now: f64) {
+        if self.anim.take().is_some() {
+            return;
+        }
+        if self.keys.is_empty() {
+            return;
+        }
+        let end = self
+            .scan
+            .as_ref()
+            .and_then(|s| self.keys.iter().position(|k| *k == s.key))
+            .unwrap_or(self.keys.len() - 1);
+        let n = self.cfg.loop_scans.min(end + 1);
+        let keys: Vec<String> = self.keys[end + 1 - n..=end].to_vec();
+        for k in &keys {
+            let have = self.cache.iter().any(|(c, _)| c == k)
+                || self.scan.as_ref().is_some_and(|s| &s.key == k);
+            if !have && !self.prefetch.contains(k) {
+                self.prefetch.insert(k.clone());
+                self.net.volume(k);
+            }
+        }
+        self.live = false;
+        self.anim = Some(Anim {
+            keys,
+            ki: 0,
+            fi: 0,
+            next_at: now,
+        });
+    }
+
+    /// How many of the loop's scans are downloaded: (have, total).
+    pub(super) fn loop_ready(&self) -> Option<(usize, usize)> {
+        let a = self.anim.as_ref()?;
+        let have = a.keys.iter().filter(|k| !self.prefetch.contains(*k)).count();
+        Some((have, a.keys.len()))
+    }
+
+    fn drop_from_loop(&mut self, key: &str) {
+        if let Some(a) = self.anim.as_mut() {
+            a.keys.retain(|k| k != key);
+            if a.keys.is_empty() {
+                self.anim = None;
+            } else if a.ki >= a.keys.len() {
+                a.ki = 0;
+                a.fi = 0;
+            }
+        }
+    }
+
+    /// Show the loop's next frame when it's due.
+    fn tick_anim(&mut self, now: f64) {
+        let Some(a) = &self.anim else { return };
+        if now < a.next_at {
+            return;
+        }
+        let key = a.keys[a.ki].clone();
+        let vol = self
+            .cache
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.clone())
+            .or_else(|| self.scan.as_ref().filter(|s| s.key == key).map(|s| s.vol.clone()));
+        let Some(vol) = vol else {
+            // still downloading: wait for it
+            if let Some(a) = self.anim.as_mut() {
+                a.next_at = now + 0.1;
+            }
+            return;
+        };
+        let frames = vol.frames(self.tilt);
+        let nf = frames.len().max(1);
+        self.loading = None;
+        self.progress = None;
+        self.show_scan(key, vol);
+        let (frame_ms, hold) = (self.cfg.loop_frame, (self.cfg.loop_frame * 4.0).max(1.2));
+        let Some(a) = self.anim.as_mut() else { return };
+        self.frame = (a.fi + 1 < nf).then(|| frames[a.fi]);
+        let last = a.ki + 1 == a.keys.len() && a.fi + 1 >= nf;
+        a.next_at = now + if last { hold } else { frame_ms };
+        if a.fi + 1 < nf {
+            a.fi += 1;
+        } else {
+            a.fi = 0;
+            a.ki = (a.ki + 1) % a.keys.len();
         }
     }
 
@@ -896,6 +1037,8 @@ impl App {
 
     fn go_live(&mut self) {
         self.live = true;
+        self.anim = None;
+        self.frame = None;
         let s = self.site.clone();
         self.select_site(&s, None);
     }
@@ -1114,6 +1257,20 @@ impl App {
                     }
                 }
                 Msg::Volume { key, vol, done } => {
+                    // a scan the loop downloads in the background: just keep it
+                    if self.prefetch.contains(&key) && self.loading.as_deref() != Some(key.as_str()) {
+                        if done {
+                            self.prefetch.remove(&key);
+                            match vol {
+                                Ok(v) => self.cache_put(&key, v),
+                                Err(e) => {
+                                    log::warn!("loop: {key}: {e}");
+                                    self.drop_from_loop(&key);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if self.loading.as_deref() != Some(key.as_str()) {
                         continue;
                     }
@@ -1470,6 +1627,10 @@ impl App {
                     }
                 }
                 Action::Radio => {}
+                Action::Play => {
+                    let now = ui.input(|i| i.time);
+                    self.toggle_loop(now);
+                }
             }
         }
     }
@@ -1510,6 +1671,10 @@ impl eframe::App for App {
             self.poll_alerts();
         }
         self.poll_feed(now, false);
+        self.tick_anim(now);
+        if self.anim.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
         self.poll_outlook(now);
         if !self.tiles.json_requested && (self.show.roads || self.show.cities) {
             self.tiles.json_requested = true;
@@ -1690,6 +1855,14 @@ impl Reveal {
     fn done(&self, now: f64) -> bool {
         self.to >= 360.0 && !self.moving(now)
     }
+}
+
+/// The loop player: which scan and frame comes next, and when.
+struct Anim {
+    keys: Vec<String>,
+    ki: usize,
+    fi: usize,
+    next_at: f64,
 }
 
 /// Small helper for muted section labels like "ACTIVE WARNINGS".
