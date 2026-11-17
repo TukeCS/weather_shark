@@ -451,12 +451,21 @@ impl Net {
         }
         let me = self.clone();
         ehttp::fetch(req, move |res| {
-            let a = res.and_then(|r| {
-                if !r.ok {
-                    return Err(format!("alerts: HTTP {}", r.status));
+            // When api.weather.gov is down its error replies have no CORS header, so a
+            // browser only says "failed to fetch": say what's going on instead.
+            let a = match res {
+                Ok(r) if r.ok => alerts::parse(&r.bytes),
+                Ok(r) if r.status >= 500 => Err(format!(
+                    "the NWS alerts service is down right now (HTTP {}); trying again every minute",
+                    r.status
+                )),
+                Ok(r) => Err(format!("NWS alerts: HTTP {}", r.status)),
+                Err(e) if cfg!(target_arch = "wasm32") => {
+                    log::warn!("alerts: {e}");
+                    Err("couldn't reach the NWS alerts service (api.weather.gov); trying again every minute".into())
                 }
-                alerts::parse(&r.bytes)
-            });
+                Err(e) => Err(format!("couldn't reach the NWS alerts service: {e}")),
+            };
             me.send(Msg::Alerts(a));
         });
     }

@@ -722,6 +722,9 @@ impl App {
         ui.label(RichText::new("ACTIVE WARNINGS & WATCHES").color(t.muted).small());
         if let Some(e) = &self.alerts_error {
             ui.colored_label(ERR, e);
+            if !self.alerts.is_empty() {
+                ui.label(RichText::new("showing the last alerts received").color(t.muted).small());
+            }
         }
         let tor = self.tornado_total();
         let tor_near = self
