@@ -30,8 +30,8 @@ i got tired of paying subscriptions
   OpenStreetMap, plus state and county lines. Every layer can be toggled
 - Click any radar site on the map to switch to it, or search by name
 - Live NWS warnings drawn as their storm polygons; watches drawn as the counties they cover.
-  You pick which kinds show up, and each can play its own sound (a siren for a confirmed tornado
-  by default). A "simulate" button previews your warning colours and sounds
+  You pick which kinds show up, and each can play its own sound (the TV / radio Emergency Alert
+  System tone for tornadoes by default). A "simulate" button previews your warning colours and sounds
 - SPC convective outlooks for days 1–3: categorical risk (MRGL … HIGH) or the tornado, wind and
   hail probabilities, with the significant (hatched) area dashed. Outline only, filled, or any
   colour per risk level, all set in Lua. Watches and warnings each have their own switch
@@ -73,7 +73,7 @@ On Linux, sound goes through PulseAudio/PipeWire when it's running (falling back
 building needs the `libasound` headers. To check your speakers:
 
 ```sh
-weather_shark test-sound siren      # or alarm, beep, chime
+weather_shark test-sound eas        # or wea, siren, alarm, beep, chime
 weather_shark test-sound radio      # 15 s of the Oklahoma City NOAA Weather Radio stream
 ```
 
@@ -132,9 +132,9 @@ from the map or the list, and `sounds = false` silences everything:
 alerts = {
     radius_km = 300,
     rules = {
-        { event = "Tornado Warning", damage = "catastrophic", sound = "siren", repeats = 5 },
-        { event = "Tornado Warning", tornado = "observed",    sound = "siren", repeats = 3 },
-        { event = "Tornado Warning",                          sound = "alarm" },
+        { event = "Tornado Warning", damage = "catastrophic", sound = "eas",   repeats = 3 },
+        { event = "Tornado Warning", tornado = "observed",    sound = "eas",   repeats = 2 },
+        { event = "Tornado Warning",                          sound = "eas"   },
         { event = "Severe Thunderstorm Warning", hail = 2.0,  sound = "beep"  },
         { event = "Severe Thunderstorm Warning",              file  = "storm.wav" },
     },
@@ -152,7 +152,9 @@ ui     = { toolbar = { "site", "time", "alerts" }, legend = false },
 keys   = { add_pane = "F2", radio = false },
 ```
 
-Built-in sounds are `siren`, `alarm` (EAS-style two-tone), `beep` and `chime`. `file` plays a
+Built-in sounds are `eas` (the TV / radio Emergency Alert System tone: 853 + 960 Hz for 8 s),
+`wea` (the same tones in the phone alert rhythm: a 2 s tone and two 1 s tones, twice), `siren`,
+`alarm` (2 s of the EAS tone), `beep` and `chime`. `file` plays a
 .wav file next to the config (native only). The global `platform` is `"native"` or `"web"` if you
 want the two to differ. See [`assets/default_config.lua`](assets/default_config.lua) for every option.
 

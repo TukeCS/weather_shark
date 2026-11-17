@@ -274,8 +274,8 @@ return {
     --   damage   "considerable" (PDS), "catastrophic" (tornado / flash flood
     --            emergency) or "destructive" (severe thunderstorm)
     --   hail     minimum hail size in inches
-    --   sound    "wea"    the phone emergency alert (853 + 960 Hz, 2 s + 1 s + 1 s, twice)
-    --            "eas"    the TV / radio Emergency Alert System tone (same tones, 8 s)
+    --   sound    "eas"    the TV / radio Emergency Alert System tone (853 + 960 Hz, 8 s)
+    --            "wea"    the phone emergency alert (same tones, 2 s + 1 s + 1 s, twice)
     --            "siren"  an outdoor warning siren
     --            "alarm"  2 s of the EAS tone, "beep", "chime", or "none"
     --   file     a .wav file to play instead (native only)
@@ -297,12 +297,12 @@ return {
         volume     = 0.8,
         on_startup = false, -- also sound alerts that were already active when the app opened
         rules = {
-            { event = "Tornado Warning", damage = "catastrophic", sound = "wea",   repeats = 3, color = "#ff2dd4" },
-            { event = "Tornado Warning", tornado = "observed",    sound = "wea",   repeats = 2, color = col.red },
-            { event = "Tornado Warning",                          sound = "wea",   color = "#ff6b6b" },
-            { event = "Extreme Wind Warning",                     sound = "siren", repeats = 3, color = "#ff8c00" },
+            { event = "Tornado Warning", damage = "catastrophic", sound = "eas",   repeats = 3, color = "#ff2dd4" },
+            { event = "Tornado Warning", tornado = "observed",    sound = "eas",   repeats = 2, color = col.red },
+            { event = "Tornado Warning",                          sound = "eas",   color = "#ff6b6b" },
+            { event = "Extreme Wind Warning",                     sound = "eas",   repeats = 3, color = "#ff8c00" },
             { event = "Severe Thunderstorm Warning", damage = "destructive", sound = "alarm", color = "#ff5e3a" },
-            { event = "Severe Thunderstorm Warning", tornado = "possible", sound = "wea", color = "#ffb347" },
+            { event = "Severe Thunderstorm Warning", tornado = "possible", sound = "eas", color = "#ffb347" },
             { event = "Severe Thunderstorm Warning", hail = 2.0,  sound = "beep",  color = col.orange },
             { event = "Severe Thunderstorm Warning",              sound = "chime", color = col.yellow },
             { event = "Flash Flood Warning", damage = "catastrophic", sound = "alarm", repeats = 2, color = "#3dffb0" },
@@ -312,7 +312,7 @@ return {
             { event = "Special Marine Warning",                   sound = "none",  color = "#ffa94d" },
 
             -- watches (dashed county outlines; the "watches" switch / A key)
-            { event = "Tornado Watch",                            sound = "wea",   color = "#ff6b6b88" },
+            { event = "Tornado Watch",                            sound = "eas",   color = "#ff6b6b88" },
             { event = "Severe Thunderstorm Watch",                sound = "none",  color = "#ffd60a66" },
             { event = "Flash Flood Watch",                        sound = "none",  color = "#4fd67a66" },
 
@@ -336,7 +336,7 @@ return {
             { event = "High Wind Warning",                        sound = "none",  color = "#daa520" },
             { event = "Red Flag Warning",                         sound = "none",  color = "#ff1493", map = false },
             { event = "Extreme Heat Warning",                     sound = "none",  color = "#c71585", map = false },
-            { event = "Tsunami Warning",                          sound = "siren", color = "#fd6347" },
+            { event = "Tsunami Warning",                          sound = "eas",   color = "#fd6347" },
         },
     },
 

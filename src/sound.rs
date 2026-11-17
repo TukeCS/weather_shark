@@ -11,7 +11,7 @@ fn tone(out: &mut Vec<f32>, secs: f32, mut f: impl FnMut(f32) -> f32) {
 }
 
 /// Built-in sound names (anything else plays nothing).
-pub const SOUNDS: [&str; 6] = ["wea", "eas", "siren", "alarm", "beep", "chime"];
+pub const SOUNDS: [&str; 6] = ["eas", "wea", "siren", "alarm", "beep", "chime"];
 
 /// The EAS / WEA attention signal: 853 Hz and 960 Hz together.
 fn attention(out: &mut Vec<f32>, secs: f32) {

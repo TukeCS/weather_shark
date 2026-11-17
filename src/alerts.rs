@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(ids[0], "tor-moore");
         let rule = &cfg.alerts.rules[kept[0].1];
         assert_eq!(rule.tornado.as_deref(), Some("observed"));
-        assert_eq!(rule.sound, "wea");
+        assert_eq!(rule.sound, "eas");
         // 2.5" hail takes the hail rule ahead of the plain severe rule
         let svr = kept.iter().find(|(a, _)| a.id == "svr-1").unwrap();
         assert_eq!(cfg.alerts.rules[svr.1].hail, Some(2.0));

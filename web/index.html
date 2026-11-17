@@ -76,7 +76,7 @@
         <li>Each sweep is drawn to a texture once, then panned and zoomed on the GPU. Panes split in a fibonacci spiral like a tiling window manager, and all share one view and one crosshair, so a velocity couplet lines up with the hook echo and any debris signature in CC.</li>
         <li>Roads, highway numbers and towns are OpenStreetMap vector tiles from OpenFreeMap, decoded by a small protobuf reader written for this.</li>
         <li>Settings, colour tables and alert sounds live in a Lua file. It runs in <a href="https://github.com/kyren/piccolo" target="_blank" rel="noopener">piccolo</a>, a Lua VM written in pure Rust, so the same config works on the desktop and here.</li>
-        <li>Active NWS warnings are checked every minute. A confirmed tornado sounds a siren, and every rule can be changed in the config. Your browser only allows sound after you click the page once.</li>
+        <li>Active NWS warnings are checked every minute. Tornado warnings play the TV emergency alert tone, and every rule can be changed in the config. Your browser only allows sound after you click the page once.</li>
       </ul>
     </section>
 
