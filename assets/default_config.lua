@@ -297,8 +297,8 @@ return {
     alerts = {
         enabled    = true,  -- false turns off alerts completely (no polygons, list or sounds)
         sounds     = true,  -- false keeps the polygons and list but never plays a sound
-        radius_km  = 300,   -- list and sound alerts this close to the radar (0 = whole country);
-                            -- every alert in the country is drawn on the map
+        radius_km  = 300,   -- only alerts this close to the radar play a sound (0 = anywhere);
+                            -- every alert in the country is drawn on the map and listed
         volume     = 0.8,
         on_startup = false, -- also sound alerts that were already active when the app opened
         rules = {

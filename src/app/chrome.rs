@@ -116,7 +116,7 @@ impl App {
                             ui,
                             Side::Alerts,
                             txt,
-                            "active warnings and watches near this radar",
+                            "active warnings and watches",
                         );
                         let tor = self.tornado_total();
                         if tor > 0 {
@@ -289,6 +289,12 @@ impl App {
     /// One checkbox per alert event that has a rule: switch a kind of alert off
     /// (map, list and sound) without editing the Lua.
     fn alert_types_menu(&mut self, ui: &mut Ui) {
+        self.alert_types(ui, "alert_types");
+    }
+
+    /// The alert-type checkboxes (in the map menu and the alerts panel; they share
+    /// one set of switches).
+    fn alert_types(&mut self, ui: &mut Ui, salt: &str) {
         if !self.cfg.alerts.enabled || self.cfg.alerts.rules.is_empty() {
             return;
         }
@@ -306,7 +312,8 @@ impl App {
             "alert types".to_string()
         };
         egui::CollapsingHeader::new(title)
-            .id_salt("alert_types")
+            .id_salt(salt)
+            .default_open(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui.small_button("all").clicked() {
@@ -522,29 +529,15 @@ impl App {
     pub(super) fn alerts_panel(&mut self, ui: &mut Ui) {
         let t = self.cfg.theme.clone();
         ui.add_space(8.0);
-        egui::Sides::new().show(
-            ui,
-            |ui| ui.label(RichText::new("ACTIVE WARNINGS & WATCHES").color(t.muted).small()),
-            |ui| {
-                if !self.simulated.is_empty()
-                    && ui.small_button("clear").on_hover_text("remove the simulated warnings and stop the sound").clicked()
-                {
-                    self.clear_simulated(None);
-                }
-                let hint = "show a fake confirmed tornado warning on the map (and play its sound) to preview your alert rules. It goes away by itself after 3 minutes";
-                if ui.small_button("simulate").on_hover_text(hint).clicked() {
-                    let now = ui.input(|i| i.time);
-                    self.simulate_warning(now);
-                }
-            },
-        );
+        ui.label(RichText::new("ACTIVE WARNINGS & WATCHES").color(t.muted).small());
         if let Some(e) = &self.alerts_error {
             ui.colored_label(ERR, e);
         }
         let tor = self.tornado_total();
         let tor_near = self
-            .listed_alerts()
-            .filter(|(_, a)| super::is_real_tornado(a))
+            .alerts
+            .iter()
+            .filter(|(a, _)| a.near && super::is_real_tornado(a))
             .count();
         ui.label(
             RichText::new(format!(
@@ -553,20 +546,37 @@ impl App {
             ))
             .color(if tor > 0 { LIVE_RED } else { t.muted }),
         );
+        // filters: a search box and the alert-type switches
+        ui.add_space(4.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut self.alert_query)
+                .hint_text("search: state, county, event…")
+                .desired_width(f32::INFINITY),
+        );
+        self.alert_types(ui, "alert_types_panel");
+        let q = self.alert_query.trim().to_lowercase();
+        let hit = |a: &crate::alerts::Alert| {
+            q.is_empty()
+                || [&a.event, &a.area, &a.headline]
+                    .iter()
+                    .any(|s| s.to_lowercase().contains(&q))
+        };
         let mut focus = None;
         let mut action: Option<(CardAction, String)> = None;
         let listed: Vec<(usize, bool)> = self
             .listed_alerts()
+            .filter(|(_, a)| hit(a))
             .map(|(i, a)| (i, self.hidden.contains(&a.id)))
             .collect();
-        if listed.is_empty() {
-            let msg = if self.cfg.alerts.radius_km > 0.0 {
-                format!("nothing within {:.0} km of {}", self.cfg.alerts.radius_km, self.site)
-            } else {
-                "no active alerts".to_string()
-            };
-            ui.label(RichText::new(msg).color(t.muted));
-        }
+        ui.label(
+            RichText::new(match (listed.len(), q.is_empty()) {
+                (0, true) => "no active alerts".to_string(),
+                (0, false) => "no alerts match".to_string(),
+                (n, _) => format!("{n} alert{}", if n == 1 { "" } else { "s" }),
+            })
+            .color(t.muted)
+            .small(),
+        );
         egui::ScrollArea::vertical().show(ui, |ui| {
             for &(i, _) in listed.iter().filter(|(_, hidden)| !hidden) {
                 if let Some(a) = self.alert_card(ui, i, false) {
@@ -664,6 +674,10 @@ impl App {
                         }
                         if simulated {
                             ui.label(RichText::new("TEST").small().background_color(t.line).color(t.fg));
+                        }
+                        if al.near && self.cfg.alerts.radius_km > 0.0 {
+                            ui.label(RichText::new(format!("near {}", self.site)).small().color(t.muted))
+                                .on_hover_text(format!("within {:.0} km of the radar: this one plays a sound", self.cfg.alerts.radius_km));
                         }
                     });
                     if !hidden {

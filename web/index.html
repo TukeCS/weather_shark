@@ -61,7 +61,7 @@
       <a class="btn" href="#KTLX 2013-05-20 20:08" data-start="KTLX 2013-05-20 20:08">Moore 2013</a>
       <a class="btn" href="#KTLX 2013-05-31 23:10" data-start="KTLX 2013-05-31 23:10">El Reno 2013</a>
       <a class="btn" href="#KPAH 2021-12-11 03:30" data-start="KPAH 2021-12-11 03:30">Mayfield 2021</a>
-      <span class="muted">Drag to pan, scroll to zoom, click a purple dot to switch radar. <kbd>n</kbd> splits in another pane (try velocity next to reflectivity), <code>radio</code> plays the nearest NOAA Weather Radio stream.</span>
+      <span class="muted">Drag to pan, scroll to zoom, click a purple dot to switch radar. <kbd>n</kbd> splits in another pane (try velocity next to reflectivity); drag the gap between panes to resize them. <code>radio</code> plays the nearest NOAA Weather Radio stream.</span>
     </div>
 
     <div class="app">
@@ -73,10 +73,12 @@
       <h2>How it works</h2>
       <ul class="notes">
         <li>Radar volumes come straight from NOAA's public NEXRAD archive on AWS. A small decoder in Rust unpacks the bzip2 records and reads the Level II message 31 radials.</li>
+        <li>Live mode doesn't wait for the finished file (5–10 minutes behind). It streams each scan from Unidata's real-time feed in pieces, seconds after the radar sends them, and sweeps every new piece in behind a rotating line on the tilt being scanned.</li>
         <li>Each sweep is drawn to a texture once, then panned and zoomed on the GPU. Panes split in a fibonacci spiral like a tiling window manager, and all share one view and one crosshair, so a velocity couplet lines up with the hook echo and any debris signature in CC.</li>
         <li>Roads, highway numbers and towns are OpenStreetMap vector tiles from OpenFreeMap, decoded by a small protobuf reader written for this.</li>
         <li>Settings, colour tables and alert sounds live in a Lua file. It runs in <a href="https://github.com/kyren/piccolo" target="_blank" rel="noopener">piccolo</a>, a Lua VM written in pure Rust, so the same config works on the desktop and here.</li>
-        <li>Active NWS warnings are checked every minute. Tornado warnings play the TV emergency alert tone, and every rule can be changed in the config. Your browser only allows sound after you click the page once.</li>
+        <li>Every active NWS warning and watch in the country is drawn and listed, checked every minute, with a nationwide tornado warning count. Search or filter them by type. Tornado warnings near your radar play the TV emergency alert tone, and every rule can be changed in the config. Your browser only allows sound after you click the page once.</li>
+        <li>SPC convective outlooks for days 1–8 can be laid over the map.</li>
       </ul>
     </section>
 

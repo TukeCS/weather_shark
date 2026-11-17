@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::level2::{Decoder, Volume};
+use crate::level2::{Decoder, Radial, Sweep, Volume};
 
 pub const BUCKET: &str = "https://unidata-nexrad-level2-chunks.s3.amazonaws.com";
 
@@ -82,7 +82,7 @@ pub struct Stream {
     /// the previous volume, shown wherever this one hasn't scanned yet
     pub base: Option<Arc<Volume>>,
     pub error: Option<String>,
-    /// sweeps finished since the app last looked (their numbers)
+    /// sweeps whose picture changed since the app last looked (their numbers)
     pub dirty: BTreeSet<u8>,
 }
 
@@ -168,6 +168,9 @@ impl Stream {
         self.got.insert(c.idx, (bytes, c.end));
         let mut changed = false;
         let before = self.dec.sweeps_done();
+        if let Some(s) = self.dec.in_progress() {
+            self.dirty.insert(s.number);
+        }
         while let Some((b, end)) = self.got.remove(&self.next) {
             if let Err(e) = self.dec.push(&b) {
                 self.error = Some(e);
@@ -178,23 +181,45 @@ impl Stream {
                 self.ended = true;
             }
         }
-        // only finished sweeps are shown, so only they change the picture
+        // the sweeps that finished, and the one now in progress
         let v = self.dec.volume();
-        let fresh = &v.sweeps[before.min(v.sweeps.len())..];
-        self.dirty.extend(fresh.iter().map(|s| s.number));
-        changed && !fresh.is_empty()
+        self.dirty
+            .extend(v.sweeps[before.min(v.sweeps.len())..].iter().map(|s| s.number));
+        if let Some(s) = self.dec.in_progress() {
+            self.dirty.insert(s.number);
+        }
+        changed
     }
 
-    /// What to show: this volume's finished sweeps, then the previous volume's for
-    /// every tilt not finished again yet. A tilt only changes once it's fully scanned.
+    /// The sweep being scanned: (its number, the azimuth it started at, how many
+    /// degrees round the radar has got).
+    pub fn scanning(&self) -> Option<(u8, f32, f32)> {
+        let s = self.dec.in_progress().filter(|s| s.radials.len() >= 2)?;
+        let a0 = s.radials[0].azimuth;
+        let span = s
+            .radials
+            .iter()
+            .fold(0.0f32, |m, r| m.max((r.azimuth - a0).rem_euclid(360.0)));
+        Some((s.number, a0, span))
+    }
+
+    /// What to show: this volume's finished sweeps, the sweep in progress drawn over
+    /// the previous volume's, and the previous volume's sweeps for every tilt not
+    /// reached yet.
     pub fn composite(&self) -> Option<Volume> {
         let v = self.dec.volume();
         if v.site.is_empty() {
             return None;
         }
         let mut out = v.clone();
-        if let Some(b) = self.base.as_ref().filter(|b| b.site == v.site) {
-            let done: BTreeSet<u8> = v.sweeps.iter().map(|s| s.number).collect();
+        let base = self.base.as_ref().filter(|b| b.site == v.site);
+        let mut done: BTreeSet<u8> = v.sweeps.iter().map(|s| s.number).collect();
+        if let Some(cur) = self.dec.in_progress().filter(|s| s.radials.len() >= 2) {
+            let old = base.and_then(|b| b.sweeps.iter().find(|s| s.number == cur.number));
+            out.sweeps.push(Arc::new(merge(cur, old.map(|s| &**s))));
+            done.insert(cur.number);
+        }
+        if let Some(b) = base {
             out.sweeps
                 .extend(b.sweeps.iter().filter(|s| !done.contains(&s.number)).cloned());
         }
@@ -208,6 +233,35 @@ impl Stream {
         Some(out)
     }
 
+}
+
+/// A sweep still being scanned, drawn over the same sweep from the previous volume:
+/// new radials where the antenna has been, old ones everywhere else.
+fn merge(cur: &Sweep, old: Option<&Sweep>) -> Sweep {
+    let mut radials: Vec<Radial> = cur.radials.clone();
+    let n = radials.len() as f32;
+    let elevation = radials.iter().map(|r| r.elevation).sum::<f32>() / n;
+    let a0 = cur.radials[0].azimuth;
+    let span = cur.radials.iter().fold(0.0f32, |m, r| m.max((r.azimuth - a0).rem_euclid(360.0)));
+    let full = span > 359.0 || cur.radials.len() > 700;
+    if let Some(old) = old.filter(|_| !full) {
+        let pad = 1.0;
+        radials.extend(
+            old.radials
+                .iter()
+                .filter(|r| {
+                    let d = (r.azimuth - a0 + pad).rem_euclid(360.0);
+                    d > span + 2.0 * pad
+                })
+                .cloned(),
+        );
+    }
+    radials.sort_by(|a, b| a.azimuth.total_cmp(&b.azimuth));
+    Sweep {
+        number: cur.number,
+        elevation,
+        radials,
+    }
 }
 
 /// "20261117-123456" → epoch seconds
@@ -240,6 +294,43 @@ mod tests {
         assert_eq!(n, 13);
         assert!(after.as_str() > "KTLX/13/20261117-123456-070-E");
         assert!(after.as_str() < "KTLX/13/20261117-124012-001-S");
+    }
+
+    fn radial(az: f32, t: f64) -> Radial {
+        Radial {
+            azimuth: az,
+            time: t,
+            spacing: 1.0,
+            elevation: 0.5,
+            moments: Default::default(),
+        }
+    }
+
+    #[test]
+    fn new_radials_replace_old_only_where_scanned() {
+        // scanned from 350° clockwise round to 20°
+        let cur = Sweep {
+            number: 1,
+            elevation: 0.5,
+            radials: (0..31).map(|i| radial((350 + i) as f32 % 360.0, i as f64)).collect(),
+        };
+        let old = Sweep {
+            number: 1,
+            elevation: 0.5,
+            radials: (0..360).map(|i| radial(i as f32, -100.0)).collect(),
+        };
+        let m = merge(&cur, Some(&old));
+        let new_at = |az: f32| {
+            m.radials
+                .iter()
+                .filter(|r| (r.azimuth - az).abs() < 0.01)
+                .all(|r| r.time >= 0.0)
+        };
+        assert!(new_at(0.0) && new_at(355.0) && new_at(20.0));
+        assert!(!new_at(90.0) && !new_at(300.0));
+        assert!(m.radials.windows(2).all(|w| w[0].azimuth <= w[1].azimuth));
+        // nothing doubled up inside the scanned arc
+        assert_eq!(m.radials.iter().filter(|r| r.azimuth == 10.0).count(), 1);
     }
 }
 
@@ -283,23 +374,19 @@ mod live_tests {
             s.arrived(&key, bytes.unwrap());
         }
         assert!(s.error.is_none(), "{:?}", s.error);
-        // only finished tilts are shown, so a volume that just started has nothing yet
-        let Some(v) = s.composite() else {
-            assert!(age < 120, "no finished tilt in a volume {age} s old");
-            println!("no tilt finished yet");
-            return;
-        };
+        let v = s.composite().expect("some radar data");
         assert_eq!(v.site, site);
         let a = v.antenna.unwrap();
         println!(
-            "{} finished sweeps, vcp {}, scanning {:.1}°, last radial {:.0} s ago",
+            "{} sweeps, vcp {}, scanning {:.1}°, last radial {:.0} s ago",
             v.sweeps.len(),
             v.vcp,
             a.elevation,
             crate::net::now_f64() - a.time
         );
-        let (az, took) = v.sweeps[0].scan_path().unwrap();
-        println!("first tilt started at {az:.0}°, took {took:.0} s");
-        assert!(took > 1.0 && took < 120.0);
+        if let Some((n, a0, span)) = s.scanning() {
+            println!("sweep {n}: started at {a0:.0}°, {span:.0}° round so far");
+            assert!((0.0..360.0).contains(&span));
+        }
     }
 }

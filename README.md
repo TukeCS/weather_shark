@@ -34,10 +34,10 @@ i got tired of paying subscriptions
   OpenStreetMap, plus state and county lines. Every layer can be toggled
 - Click any radar site on the map to switch to it, or search by name
 - Live NWS warnings drawn as their storm polygons; watches drawn as the counties they cover.
-  Every active alert in the country is drawn at once; the list and sounds stick to the ones near
-  your radar, and the toolbar counts tornado warnings nationwide. Each kind can be switched off from
-  the map menu, and each can play its own sound (the TV / radio Emergency Alert
-  System tone for tornadoes by default). A "simulate" button previews your warning colours and sounds
+  Every active alert in the country is drawn and listed at once, and the toolbar counts tornado
+  warnings nationwide. Filter the list by type or search it by state, county or event; each kind can
+  be switched off (map and list) from the map menu or the alerts panel. Only alerts near your radar
+  play a sound, each kind its own (the TV / radio Emergency Alert System tone for tornadoes by default)
 - SPC convective outlooks for days 1–8: categorical risk (MRGL … HIGH) or the tornado, wind and
   hail probabilities (days 4–8: the 15% / 30% severe areas), with the significant (hatched) area dashed. Outline only, filled, or any
   colour per risk level, all set in Lua. Watches and warnings each have their own switch

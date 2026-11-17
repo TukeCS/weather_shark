@@ -165,6 +165,9 @@ pub struct App {
     feed_dirty: bool,
     /// tilts that just finished, being swept in over the previous scan
     reveals: Vec<Reveal>,
+    /// when the live picture last changed, and the usual time between changes
+    last_update: f64,
+    update_gap: f64,
 
     alerts: Vec<(Alert, usize)>,
     seen: HashSet<String>,
@@ -178,6 +181,8 @@ pub struct App {
     hidden: HashSet<String>,
     /// alert events switched off in the map menu (kept across config reloads)
     off_events: HashSet<String>,
+    /// search box in the alerts panel (event, area or headline)
+    alert_query: String,
     player: Player,
 
     outlook: Option<crate::spc::Outlook>,
@@ -317,6 +322,8 @@ impl App {
             feed_polls: 0,
             feed_dirty: false,
             reveals: Vec::new(),
+            last_update: f64::NEG_INFINITY,
+            update_gap: 4.0,
             alerts: Vec::new(),
             seen: HashSet::new(),
             alerts_once: false,
@@ -326,6 +333,7 @@ impl App {
             simulated: Vec::new(),
             hidden: HashSet::new(),
             off_events: HashSet::new(),
+            alert_query: String::new(),
             outlook: None,
             outlook_error: None,
             outlook_asked: None,
@@ -660,8 +668,7 @@ impl App {
         }
         self.scan.as_ref().filter(|s| s.key.starts_with("live:"))?;
         let r = self.reveals.iter().find(|r| r.number == number)?;
-        let k = ((now - r.start) / r.dur).clamp(0.0, 1.0) as f32;
-        (k < 1.0).then_some((r.from_az, k))
+        (!r.done(now)).then(|| (r.from_az, r.progress(now)))
     }
 
     // ---- real-time chunks ---------------------------------------------------------
@@ -771,22 +778,46 @@ impl App {
             return;
         }
         let key = f.key();
+        let scanning = f.scanning();
         let new_volume = self.scan.as_ref().is_none_or(|s| s.key != key);
-        // each tilt that just finished turns in once, at the speed the radar scanned it
-        for s in vol.sweeps.iter().filter(|s| dirty.contains(&s.number)) {
-            if let Some((from_az, took)) = s.scan_path() {
-                self.reveals.retain(|r| r.number != s.number);
-                self.reveals.push(Reveal {
-                    number: s.number,
-                    from_az,
-                    start: now,
-                    dur: took.clamp(2.0, 12.0),
-                });
+        if new_volume {
+            self.reveals.clear();
+        }
+        // how long until the next data, so each glide ends about when it arrives
+        if self.last_update.is_finite() {
+            let gap = now - self.last_update;
+            self.update_gap = (0.6 * self.update_gap + 0.4 * gap).clamp(0.5, 12.0);
+        }
+        self.last_update = now;
+        let dur = self.update_gap;
+        for r in &mut self.reveals {
+            // the radar moved on to another tilt: finish this one's turn
+            let target = match scanning {
+                Some((n, _, span)) if n == r.number => span.max(r.to),
+                _ => 360.0,
+            };
+            if target > r.to {
+                r.from = r.progress(now);
+                r.to = target;
+                r.start = now;
+                r.dur = dur;
             }
+        }
+        if let Some((n, a0, span)) = scanning
+            && !self.reveals.iter().any(|r| r.number == n)
+        {
+            self.reveals.push(Reveal {
+                number: n,
+                from_az: a0,
+                from: 0.0,
+                to: span,
+                start: now,
+                dur,
+            });
         }
         self.show_scan(key, Arc::new(vol));
         if !new_volume {
-            // the old images (under a reveal) stay; the finished tilts are redrawn
+            // the old images (under a reveal) stay; the tilts that changed are redrawn
             self.textures
                 .retain(|(_, n, _, old), _| *old || !dirty.contains(n));
         }
@@ -1024,10 +1055,11 @@ impl App {
         !self.off_events.contains(&self.cfg.alerts.rules[rule].event)
     }
 
-    /// Alerts for the list and the toolbar count: near the radar, switched on, list = true.
+    /// Alerts for the list and the toolbar count: anywhere in the country, switched
+    /// on, and not `list = false`.
     fn listed_alerts(&self) -> impl Iterator<Item = (usize, &Alert)> {
         self.alerts.iter().enumerate().filter_map(|(i, (a, r))| {
-            (a.near && self.event_on(*r) && self.cfg.alerts.rules[*r].list).then_some((i, a))
+            (self.event_on(*r) && self.cfg.alerts.rules[*r].list).then_some((i, a))
         })
     }
 
@@ -1487,8 +1519,10 @@ impl eframe::App for App {
         ctx.request_repaint_after(std::time::Duration::from_secs(repaint));
         if self.feed.is_some() && self.live {
             // keep polling for chunks; ~30 fps while a tilt is being swept in
-            self.reveals.retain(|r| now - r.start < r.dur);
-            let ms = if self.reveals.is_empty() { 1000 } else { 33 };
+            // a line left waiting at the data edge for long means the feed stalled
+            self.reveals
+                .retain(|r| !r.done(now) && now - (r.start + r.dur) < 30.0);
+            let ms = if self.reveals.iter().any(|r| r.moving(now)) { 33 } else { 1000 };
             ctx.request_repaint_after(std::time::Duration::from_millis(ms));
         }
 
@@ -1630,11 +1664,32 @@ fn is_real_tornado(a: &Alert) -> bool {
 
 /// A freshly finished tilt being swept onto the map: one turn from where the radar
 /// started it, as long as the radar took (capped), starting at `start` (UI clock).
+/// A tilt being swept in behind the line, chunk by chunk: the line goes from `from`
+/// to `to` degrees round (counted from `from_az`, where the radar started the tilt)
+/// over `dur` seconds from `start` (UI clock). New data only shows behind it.
 struct Reveal {
     number: u8,
     from_az: f32,
+    from: f32,
+    to: f32,
     start: f64,
     dur: f64,
+}
+
+impl Reveal {
+    fn progress(&self, now: f64) -> f32 {
+        let k = ((now - self.start) / self.dur).clamp(0.0, 1.0) as f32;
+        self.from + (self.to - self.from) * k
+    }
+
+    fn moving(&self, now: f64) -> bool {
+        now < self.start + self.dur
+    }
+
+    /// The whole tilt is shown: drop it and draw the tilt normally.
+    fn done(&self, now: f64) -> bool {
+        self.to >= 360.0 && !self.moving(now)
+    }
 }
 
 /// Small helper for muted section labels like "ACTIVE WARNINGS".

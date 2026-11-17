@@ -175,8 +175,8 @@ impl App {
             self.draw_outlook_fill(&painter, rect, o);
         }
 
-        // radar image. A tilt the radar just finished turns in over the previous scan
-        // of it, behind a rotating line.
+        // radar image. The tilt being scanned is swept in over its previous scan,
+        // chunk by chunk, behind a rotating line.
         let now = ui.input(|i| i.time);
         let shown = self
             .scan
@@ -195,13 +195,14 @@ impl App {
             );
         };
         match reveal {
-            Some((n, (from_az, k))) => {
+            Some((n, (from_az, swept))) => {
+                // the previous scan of this tilt, then the new data behind the line
                 if let Some((old, range)) = self.old_texture(ui.ctx(), m, n) {
                     full(self, &old, range);
                 }
                 if let Some((tex, range)) = self.texture(ui.ctx(), m) {
-                    self.draw_wedge(&painter, rect, &tex, range, from_az, 360.0 * k);
-                    self.draw_sweep_line(&painter, rect, from_az + 360.0 * k, range);
+                    self.draw_wedge(&painter, rect, &tex, range, from_az, swept);
+                    self.draw_sweep_line(&painter, rect, from_az + swept, range);
                 }
             }
             None => {
