@@ -80,6 +80,7 @@ impl Moment {
 }
 
 /// One moment along one radial. Raw gate values: 0 = below threshold, 1 = range folded.
+#[derive(Clone)]
 pub struct Gates {
     pub first_m: f32,
     pub spacing_m: f32,
@@ -128,11 +129,14 @@ impl Gates {
     }
 }
 
+#[derive(Clone)]
 pub struct Radial {
     pub azimuth: f32,
+    /// when it was collected, seconds since the Unix epoch
+    pub time: f64,
     pub spacing: f32,
     pub elevation: f32,
-    moments: [Option<Gates>; 6],
+    pub(crate) moments: [Option<Gates>; 6],
 }
 
 impl Radial {
@@ -141,6 +145,7 @@ impl Radial {
     }
 }
 
+#[derive(Clone)]
 pub struct Sweep {
     pub number: u8,
     pub elevation: f32,
@@ -163,6 +168,16 @@ pub struct Volume {
     pub time: i64,
     /// Finished sweeps, lowest tilt first. Shared, so partial snapshots are cheap.
     pub sweeps: Vec<Arc<Sweep>>,
+    /// Where the antenna was at the last radial decoded (live data only).
+    pub antenna: Option<Antenna>,
+}
+
+/// The tilt the antenna was scanning at the newest radial, and when.
+#[derive(Clone, Copy, Debug)]
+pub struct Antenna {
+    pub elevation: f32,
+    /// seconds since the Unix epoch
+    pub time: f64,
 }
 
 impl Volume {
@@ -250,6 +265,7 @@ impl Decoder {
                 vcp: 0,
                 time: 0,
                 sweeps: Vec::new(),
+                antenna: None,
             },
             cur: None,
         }
@@ -383,6 +399,10 @@ impl Decoder {
                     if self.cur.as_ref().is_some_and(|c| c.number != number) {
                         self.close_sweep();
                     }
+                    self.vol.antenna = Some(Antenna {
+                        elevation: radial.elevation,
+                        time: radial.time,
+                    });
                     self.cur
                         .get_or_insert_with(|| Sweep {
                             number,
@@ -415,6 +435,16 @@ impl Decoder {
         self.vol.sweeps.push(Arc::new(s));
     }
 
+    /// The sweep being decoded right now, radials in the order they were collected.
+    pub fn in_progress(&self) -> Option<&Sweep> {
+        self.cur.as_ref()
+    }
+
+    /// The volume so far (site, time, finished sweeps), even with no sweep finished yet.
+    pub fn volume(&self) -> &Volume {
+        &self.vol
+    }
+
     /// The completed sweeps so far, as a volume (cheap: sweeps are shared).
     pub fn snapshot(&self) -> Option<Volume> {
         (!self.vol.sweeps.is_empty()).then(|| self.vol.clone())
@@ -439,6 +469,8 @@ fn parse_m31(b: &[u8], vol: &mut Volume) -> Option<(Radial, u8, u8, String)> {
         return None;
     }
     let site = String::from_utf8_lossy(&b[0..4]).to_string();
+    // collection time: ms after midnight, then the day (1 = 1970-01-01)
+    let time = (be16(b, 8) as f64 - 1.0) * 86400.0 + be32(b, 4) as f64 / 1000.0;
     let azimuth = bef32(b, 12);
     let spacing = match b[20] {
         1 => 0.5,
@@ -449,6 +481,7 @@ fn parse_m31(b: &[u8], vol: &mut Volume) -> Option<(Radial, u8, u8, String)> {
     let count = (be16(b, 30) as usize).min(10);
     let mut radial = Radial {
         azimuth,
+        time,
         spacing,
         elevation,
         moments: Default::default(),

@@ -138,6 +138,12 @@ pub struct App {
     /// Where a newly added pane grows out from (the pane it split).
     spawn: Option<(u64, Rect)>,
     last_rects: Vec<(u64, Rect)>,
+    /// split ratios from dragging the borders between panes (NaN = the default)
+    split_ratios: Vec<f32>,
+    /// (pane count, layout) the ratios were dragged in
+    split_shape: Option<(usize, crate::config::LayoutMode)>,
+    /// a divider is being dragged: panes follow it without animating
+    resizing: bool,
     hovered_pane: Option<usize>,
     textures: HashMap<(u64, u8, Moment), (TextureHandle, f32)>,
 
@@ -147,6 +153,15 @@ pub struct App {
     fitted: bool,
     /// Once the user pans or zooms, stop auto-fitting the view to the window.
     user_moved: bool,
+
+    /// real-time volume coming in from the chunks bucket
+    feed: Option<crate::chunks::Stream>,
+    /// site whose live chunk folder is being looked up
+    feed_finding: Option<String>,
+    last_feed_poll: f64,
+    feed_polls: u32,
+    /// new chunks decoded this frame: rebuild the picture once, after the messages
+    feed_dirty: bool,
 
     alerts: Vec<(Alert, usize)>,
     seen: HashSet<String>,
@@ -158,6 +173,8 @@ pub struct App {
     simulated: Vec<(Alert, f64)>,
     /// warnings the user hid from the map (they stay listed under HIDDEN)
     hidden: HashSet<String>,
+    /// alert events switched off in the map menu (kept across config reloads)
+    off_events: HashSet<String>,
     player: Player,
 
     outlook: Option<crate::spc::Outlook>,
@@ -281,6 +298,9 @@ impl App {
             panes,
             spawn: None,
             last_rects: Vec::new(),
+            split_ratios: Vec::new(),
+            split_shape: None,
+            resizing: false,
             hovered_pane: None,
             textures: HashMap::new(),
             center: Vec2::ZERO,
@@ -288,6 +308,11 @@ impl App {
             hover: None,
             fitted: false,
             user_moved: false,
+            feed: None,
+            feed_finding: None,
+            last_feed_poll: f64::NEG_INFINITY,
+            feed_polls: 0,
+            feed_dirty: false,
             alerts: Vec::new(),
             seen: HashSet::new(),
             alerts_once: false,
@@ -296,6 +321,7 @@ impl App {
             alarm_until: 0.0,
             simulated: Vec::new(),
             hidden: HashSet::new(),
+            off_events: HashSet::new(),
             outlook: None,
             outlook_error: None,
             outlook_asked: None,
@@ -489,6 +515,8 @@ impl App {
         self.progress = None;
         self.error = None;
         self.target = target;
+        self.feed = None;
+        self.feed_finding = None;
         match target {
             Some(t) => {
                 self.live = false;
@@ -497,6 +525,10 @@ impl App {
             None => {
                 self.list(today());
                 self.list(today() - 1);
+                if self.cfg.realtime {
+                    self.feed_finding = Some(self.site.clone());
+                    self.net.chunk_find(&self.site);
+                }
             }
         }
     }
@@ -603,9 +635,128 @@ impl App {
             }
         } else if self.live
             && let Some(k) = self.keys.last().cloned()
+            && !net::key_time(&k).is_some_and(|t| self.live_newer(t))
         {
             self.load(&k);
         }
+    }
+
+    /// The live feed is on screen with data at least as new as `t`.
+    fn live_newer(&self, t: i64) -> bool {
+        self.scan
+            .as_ref()
+            .is_some_and(|s| s.key.starts_with("live:") && s.vol.time >= t)
+    }
+
+    // ---- real-time chunks ---------------------------------------------------------
+
+    /// The newest complete archive scan of this radar, to fill in what the live
+    /// volume hasn't scanned yet.
+    fn archive_base(&self) -> Option<Arc<Volume>> {
+        self.scan
+            .as_ref()
+            .filter(|s| !s.key.starts_with("live:") && s.vol.site == self.site)
+            .map(|s| s.vol.clone())
+            .or_else(|| {
+                self.cache
+                    .iter()
+                    .filter(|(_, v)| v.site == self.site)
+                    .max_by_key(|(_, v)| v.time)
+                    .map(|(_, v)| v.clone())
+            })
+    }
+
+    /// Look for new chunks every few seconds (and for the next volume).
+    fn poll_feed(&mut self, now: f64, force: bool) {
+        let Some(f) = &self.feed else { return };
+        if !self.live || (!force && now - self.last_feed_poll < 2.5) {
+            return;
+        }
+        self.last_feed_poll = now;
+        self.feed_polls += 1;
+        if !f.ended {
+            self.net.chunk_list(&f.site, f.num, &f.last_key);
+        }
+        // the next folder too, in case this volume's last chunk never shows up
+        if f.ended || self.feed_polls.is_multiple_of(6) {
+            let (n, after) = f.next_after();
+            self.net.chunk_list(&f.site, n, &after);
+        }
+    }
+
+    fn feed_listed(&mut self, site: String, num: u16, keys: Result<Vec<String>, String>) {
+        use crate::chunks::{Stream, next_num, parse_key};
+        let Some(f) = self.feed.as_mut().filter(|f| f.site == site) else {
+            return;
+        };
+        let keys = match keys {
+            Ok(k) => k,
+            Err(e) => {
+                log::warn!("{e}");
+                return;
+            }
+        };
+        let get = if num == f.num {
+            f.listed(&keys)
+        } else if num == next_num(f.num) {
+            // the radar started a new volume: what we have becomes its background
+            let Some(stamp) = keys
+                .iter()
+                .filter_map(|k| parse_key(k))
+                .map(|c| c.stamp)
+                .filter(|s| *s > f.stamp)
+                .min()
+            else {
+                return;
+            };
+            let base = f.composite().map(Arc::new).or_else(|| f.base.clone());
+            let mut nf = Stream::new(&site, num, &stamp, base);
+            let get = nf.listed(&keys);
+            *f = nf;
+            get
+        } else {
+            return;
+        };
+        for k in get {
+            self.net.chunk(&k);
+        }
+    }
+
+    fn feed_chunk(&mut self, key: String, bytes: Result<Vec<u8>, String>) {
+        // (the picture is rebuilt once per frame in show_feed)
+        let Some(f) = self.feed.as_mut() else { return };
+        let changed = match bytes {
+            Ok(b) => f.arrived(&key, b),
+            Err(e) => {
+                log::warn!("{key}: {e}");
+                f.failed(&key);
+                false
+            }
+        };
+        if let Some(e) = f.error.take() {
+            log::warn!("live data {}: {e}", f.key());
+        }
+        if changed && self.live {
+            self.feed_dirty = true;
+        }
+    }
+
+    /// Put the live volume on screen. Only the images of sweeps that changed are redrawn.
+    fn show_feed(&mut self) {
+        let Some(f) = self.feed.as_mut() else { return };
+        let dirty = std::mem::take(&mut f.dirty);
+        let Some(vol) = f.composite() else { return };
+        // never step back to something older than the archive scan on screen
+        if self
+            .scan
+            .as_ref()
+            .is_some_and(|s| !s.key.starts_with("live:") && s.vol.time > vol.time)
+        {
+            return;
+        }
+        let key = f.key();
+        self.show_scan(key, Arc::new(vol));
+        self.textures.retain(|(_, n, _), _| !dirty.contains(n));
     }
 
     fn step(&mut self, dir: i32) {
@@ -613,7 +764,13 @@ impl App {
             return;
         };
         self.live = false;
-        let i = self.keys.iter().position(|k| *k == cur).unwrap_or(0) as i32 + dir;
+        // the live volume comes after every archived one
+        let pos = if cur.starts_with("live:") {
+            self.keys.len()
+        } else {
+            self.keys.iter().position(|k| *k == cur).unwrap_or(0)
+        };
+        let i = pos as i32 + dir;
         if i >= 0 && (i as usize) < self.keys.len() {
             let k = self.keys[i as usize].clone();
             self.load(&k);
@@ -629,6 +786,8 @@ impl App {
     /// Show a radar file the user opened, centred on its radar.
     fn show_local(&mut self, name: String, vol: Arc<Volume>) {
         self.live = false;
+        self.feed = None;
+        self.feed_finding = None;
         self.target = None;
         self.loading = None;
         self.progress = None;
@@ -737,10 +896,14 @@ impl App {
             self.map.county(fips)
         });
 
-        // Sound the most important new alert (rules earlier in the list win).
+        // Sound the most important new alert near the radar (rules earlier in the list win).
         let fresh = kept
             .iter()
-            .filter(|(al, _)| !self.seen.contains(&al.id))
+            .filter(|(al, r)| {
+                al.near
+                    && !self.seen.contains(&al.id)
+                    && !self.off_events.contains(&a.rules[*r].event)
+            })
             .map(|(_, r)| *r)
             .min();
         if let Some(r) = fresh
@@ -810,6 +973,7 @@ impl App {
             polygons: vec![ring],
             counties: Vec::new(),
             county_based: false,
+            near: true,
         };
         self.simulated.push((al, now + 180.0));
         self.alerts_once = true; // so it sounds even right after startup
@@ -820,6 +984,26 @@ impl App {
             .map(|(a, _)| a.clone())
             .collect();
         self.update_alerts(real, now);
+    }
+
+    /// Whether an alert's event type is switched on in the map menu.
+    fn event_on(&self, rule: usize) -> bool {
+        !self.off_events.contains(&self.cfg.alerts.rules[rule].event)
+    }
+
+    /// Alerts for the list and the toolbar count: near the radar, switched on, list = true.
+    fn listed_alerts(&self) -> impl Iterator<Item = (usize, &Alert)> {
+        self.alerts.iter().enumerate().filter_map(|(i, (a, r))| {
+            (a.near && self.event_on(*r) && self.cfg.alerts.rules[*r].list).then_some((i, a))
+        })
+    }
+
+    /// Real tornado warnings in effect anywhere in the country.
+    fn tornado_total(&self) -> usize {
+        self.alerts
+            .iter()
+            .filter(|(a, _)| is_real_tornado(a))
+            .count()
     }
 
     // ---- radio ------------------------------------------------------------------
@@ -878,10 +1062,19 @@ impl App {
                             if done {
                                 log::info!("loaded {key} ({} sweeps)", vol.sweeps.len());
                                 self.cache_put(&key, vol.clone());
+                                // the live feed's first volume uses it for the tilts it hasn't reached
+                                if let Some(f) = self.feed.as_mut()
+                                    && f.base.is_none()
+                                    && f.site == vol.site
+                                {
+                                    f.base = Some(vol.clone());
+                                }
                             } else {
                                 log::debug!("early view of {key}: {} sweeps", vol.sweeps.len());
                             }
-                            self.show_scan(key, vol);
+                            if !self.live_newer(vol.time) {
+                                self.show_scan(key, vol);
+                            }
                         }
                         Err(e) => self.error = Some(e),
                     }
@@ -909,6 +1102,24 @@ impl App {
                     Err(e) => self.outlook_error = Some(e),
                 },
                 Msg::Tile { key, tile } => self.tiles.done(key, tile),
+                Msg::ChunkFound { site, found } => {
+                    if self.feed_finding.as_deref() != Some(site.as_str()) {
+                        continue;
+                    }
+                    self.feed_finding = None;
+                    match found {
+                        Ok((num, stamp)) => {
+                            log::info!("live data: {site} volume {num} ({stamp})");
+                            let base = self.archive_base();
+                            self.feed = Some(crate::chunks::Stream::new(&site, num, &stamp, base));
+                            self.poll_feed(now, true);
+                        }
+                        // the archive keeps working without it
+                        Err(e) => log::warn!("live data for {site}: {e}"),
+                    }
+                }
+                Msg::ChunkList { site, num, keys } => self.feed_listed(site, num, keys),
+                Msg::Chunk { key, bytes } => self.feed_chunk(key, bytes),
                 Msg::Local { name, vol } => match vol {
                     Ok(vol) => self.show_local(name, vol),
                     Err(e) => self.error = Some(e),
@@ -930,6 +1141,9 @@ impl App {
                     Err(e) => self.radio_error = Some(e),
                 },
             }
+        }
+        if std::mem::take(&mut self.feed_dirty) {
+            self.show_feed();
         }
     }
 
@@ -1006,8 +1220,48 @@ impl App {
         }
     }
 
+    /// Drag the gaps between panes to resize them; double-click one to reset it.
+    fn dividers(&mut self, ui: &mut Ui, dividers: &[layout::Divider]) {
+        let mut resizing = false;
+        for d in dividers {
+            let id = egui::Id::NULL.with(("divider", d.idx));
+            let resp = ui.interact(d.strip, id, egui::Sense::click_and_drag());
+            if resp.hovered() || resp.dragged() {
+                ui.ctx().set_cursor_icon(if d.vertical {
+                    egui::CursorIcon::ResizeHorizontal
+                } else {
+                    egui::CursorIcon::ResizeVertical
+                });
+                let c = d.strip.center();
+                let line = if d.vertical {
+                    [pos2(c.x, d.strip.min.y), pos2(c.x, d.strip.max.y)]
+                } else {
+                    [pos2(d.strip.min.x, c.y), pos2(d.strip.max.x, c.y)]
+                };
+                ui.painter()
+                    .line_segment(line, Stroke::new(2.0, self.cfg.theme.accent));
+            }
+            if resp.double_clicked() {
+                if let Some(r) = self.split_ratios.get_mut(d.idx) {
+                    *r = f32::NAN; // back to the default
+                }
+            } else if resp.dragged()
+                && let Some(p) = resp.interact_pointer_pos()
+            {
+                resizing = true;
+                if self.split_ratios.len() <= d.idx {
+                    self.split_ratios.resize(d.idx + 1, f32::NAN);
+                }
+                self.split_ratios[d.idx] = d.ratio_at(p, self.cfg.layout.gap);
+            }
+        }
+        self.resizing = resizing;
+    }
+
     /// Animate a pane towards its slot in the layout.
     fn animated_rect(&mut self, ctx: &egui::Context, id: u64, target: Rect) -> Rect {
+        // follow the pointer exactly while a divider is dragged
+        let t = if self.resizing { 0.0 } else { 0.22 };
         let base = egui::Id::NULL.with(("pane-rect", id));
         if let Some((sid, from)) = self.spawn
             && sid == id
@@ -1021,7 +1275,6 @@ impl App {
             }
             self.spawn = None;
         }
-        let t = 0.22;
         let a = |i: usize, v: f32| ctx.animate_value_with_time(base.with(i), v, t);
         Rect::from_min_max(
             pos2(a(0, target.min.x), a(1, target.min.y)),
@@ -1038,7 +1291,13 @@ impl App {
             && self.loading.is_none()
             && self.tiles.template.is_some()
             && self.tiles.inflight() == 0
-            && !self.textures.is_empty();
+            && !self.textures.is_empty()
+            // live: wait for the real-time data once it's been found
+            && self.feed_finding.is_none()
+            && self
+                .feed
+                .as_ref()
+                .is_none_or(|f| self.live_newer(0) && f.caught_up());
         self.shot_ready_frames = if ready { self.shot_ready_frames + 1 } else { 0 };
         if self.shot_ready_frames == 1 && shot.simulate && self.simulated.is_empty() {
             let now = ctx.input(|i| i.time);
@@ -1182,6 +1441,7 @@ impl eframe::App for App {
             self.last_alerts = now;
             self.poll_alerts();
         }
+        self.poll_feed(now, false);
         self.poll_outlook(now);
         if !self.tiles.json_requested && (self.show.roads || self.show.cities) {
             self.tiles.json_requested = true;
@@ -1189,12 +1449,16 @@ impl eframe::App for App {
         }
         let repaint = if now < self.alarm_until { 0 } else { 5 };
         ctx.request_repaint_after(std::time::Duration::from_secs(repaint));
+        if self.feed.is_some() && self.live {
+            // keep polling for new chunks
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
 
         // fit `view_km` around the radar until the user moves the map (the window
         // may still be settling into its size on the first frames)
         if !self.fitted || !self.user_moved {
             let r = ui.available_rect_before_wrap();
-            let rects = layout::rects(r, self.panes.len(), &self.cfg.layout);
+            let rects = layout::tile(r, self.panes.len(), &self.cfg.layout, &self.split_ratios).0;
             let w = rects
                 .iter()
                 .map(|r| r.width().min(r.height()))
@@ -1270,7 +1534,14 @@ impl eframe::App for App {
                     self.hover = None;
                 }
                 self.hovered_pane = None;
-                let targets = layout::rects(area, self.panes.len(), &self.cfg.layout);
+                // dragged split ratios only make sense for the layout they were made in
+                let shape = (self.panes.len(), self.cfg.layout.mode);
+                if self.split_shape != Some(shape) {
+                    self.split_shape = Some(shape);
+                    self.split_ratios.clear();
+                }
+                let (targets, dividers) =
+                    layout::tile(area, self.panes.len(), &self.cfg.layout, &self.split_ratios);
                 let mut rects = Vec::new();
                 for (i, target) in targets.into_iter().enumerate() {
                     let id = self.panes[i].id;
@@ -1279,6 +1550,7 @@ impl eframe::App for App {
                     self.pane(ui, r, i);
                 }
                 self.last_rects = rects;
+                self.dividers(ui, &dividers);
                 self.request_tiles();
                 self.error_toast(ui, area);
                 if ui.input(|i| !i.raw.hovered_files.is_empty()) {
@@ -1312,6 +1584,10 @@ impl eframe::App for App {
             _storage.set_string(STORE_KEY, self.editor.clone());
         }
     }
+}
+
+fn is_real_tornado(a: &Alert) -> bool {
+    a.event.eq_ignore_ascii_case("Tornado Warning") && !a.id.starts_with("simulated-")
 }
 
 /// Small helper for muted section labels like "ACTIVE WARNINGS".

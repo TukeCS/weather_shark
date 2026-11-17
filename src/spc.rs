@@ -1,5 +1,6 @@
 //! SPC convective outlooks (spc.noaa.gov GeoJSON): the categorical risk
-//! (TSTM … HIGH) and the tornado / wind / hail probabilities for days 1–3.
+//! (TSTM … HIGH) and the tornado / wind / hail probabilities for days 1–3, and the
+//! day 4–8 outlooks (15% / 30% chance of severe weather only).
 
 use egui::Color32;
 
@@ -11,7 +12,7 @@ pub enum Kind {
     Tornado,
     Wind,
     Hail,
-    /// Day 3 only has one probability: any severe weather.
+    /// Days 3–8 only have one probability: any severe weather.
     Severe,
 }
 
@@ -49,7 +50,9 @@ impl Kind {
 
     /// The products SPC issues for a day.
     pub fn for_day(day: u8) -> &'static [Kind] {
-        if day >= 3 {
+        if day >= 4 {
+            &[Kind::Severe]
+        } else if day == 3 {
             &[Kind::Categorical, Kind::Severe]
         } else {
             &[Kind::Categorical, Kind::Tornado, Kind::Wind, Kind::Hail]
@@ -63,11 +66,8 @@ impl Kind {
             (Kind::Severe, false) => Kind::Categorical,
             (k, _) => k,
         };
-        if Kind::for_day(day).contains(&k) {
-            k
-        } else {
-            Kind::Categorical
-        }
+        let kinds = Kind::for_day(day);
+        if kinds.contains(&k) { k } else { kinds[0] }
     }
 }
 
@@ -80,6 +80,12 @@ pub struct Sel {
 
 impl Sel {
     pub fn url(self) -> String {
+        if self.day >= 4 {
+            return format!(
+                "https://www.spc.noaa.gov/products/exper/day4-8/day{}prob.lyr.geojson",
+                self.day
+            );
+        }
         format!(
             "https://www.spc.noaa.gov/products/outlook/day{}otlk_{}.lyr.geojson",
             self.day,
@@ -324,6 +330,29 @@ mod tests {
             kind: Kind::Severe,
         };
         assert!(s.url().ends_with("/day3otlk_prob.lyr.geojson"));
+    }
+
+    #[test]
+    fn days_four_to_eight_are_severe_only() {
+        for d in 4..=8 {
+            assert_eq!(Kind::for_day(d), &[Kind::Severe]);
+            assert_eq!(Kind::Categorical.on_day(d), Kind::Severe);
+            assert_eq!(Kind::Tornado.on_day(d), Kind::Severe);
+        }
+        assert_eq!(Kind::Severe.on_day(3), Kind::Severe);
+        let s = Sel {
+            day: 6,
+            kind: Kind::Severe,
+        };
+        assert_eq!(
+            s.url(),
+            "https://www.spc.noaa.gov/products/exper/day4-8/day6prob.lyr.geojson"
+        );
+        let doc = r##"{"features": [{"geometry": {"type": "MultiPolygon", "coordinates": [[[[-98.0, 34.0], [-96.0, 34.0], [-96.0, 36.0], [-98.0, 34.0]]]]},
+            "properties": {"VALID": "202611201200", "EXPIRE": "202611211200", "ISSUE": "202611170958",
+              "LABEL": "0.15", "LABEL2": "15% Any Severe Risk", "fill": "#FFE066"}}]}"##;
+        let o = parse(doc.as_bytes(), s).unwrap();
+        assert_eq!(o.areas[0].label, "15%");
     }
 
     fn net_fmt(t: i64) -> String {

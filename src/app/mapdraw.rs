@@ -313,7 +313,8 @@ impl App {
 
     pub(super) fn draw_warnings(&self, painter: &Painter, rect: Rect) {
         for (al, r) in &self.alerts {
-            if !self.cfg.alerts.rules[*r].map || self.hidden.contains(&al.id) {
+            if !self.cfg.alerts.rules[*r].map || self.hidden.contains(&al.id) || !self.event_on(*r)
+            {
                 continue;
             }
             let watch = al.is_watch();
@@ -326,7 +327,8 @@ impl App {
                     .iter()
                     .map(|&(x, y)| self.ll_to_screen(rect, x, y))
                     .collect();
-                if pts.len() < 2 {
+                // every alert in the country is drawn, so skip the ones off screen
+                if pts.len() < 2 || !rect.intersects(Rect::from_points(&pts)) {
                     continue;
                 }
                 if al.county_based {

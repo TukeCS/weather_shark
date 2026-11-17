@@ -32,6 +32,8 @@ return {
     site            = "KTLX",   -- radar to open on start (click any dot on the map to switch)
     live            = true,     -- follow the newest scan
     refresh_seconds = 60,       -- how often to look for a new scan / new alerts
+    realtime        = true,     -- live: stream each scan as the radar sends it (seconds behind)
+                                -- instead of waiting for the finished file (5-10 min behind)
     tilt            = 0.5,      -- elevation angle in degrees
     view_km         = 160,      -- how far around the radar to show on start (R resets to this)
     velocity_units  = "kt",     -- "kt", "mph" or "ms" (the VEL palette below uses these units)
@@ -149,8 +151,8 @@ return {
     -- was issued, so it never shows today's risk over a past event.
     outlook = {
         show  = false,  -- on start: false, or "categorical", "tornado", "wind",
-                        -- "hail" (days 1-2) or "severe" (day 3)
-        day   = 1,      -- 1, 2 or 3
+                        -- "hail" (days 1-2) or "severe" (days 3-8)
+        day   = 1,      -- 1 to 8 (days 4-8 are only 15% / 30% severe areas)
         width = 1.6,    -- outline width; 0 = no outlines
         fill  = 0,      -- fill opacity 0..1 using SPC's colours (try 0.15); 0 = no fill
         fill_under_radar = true,  -- false draws the fill over the radar echoes
@@ -294,7 +296,8 @@ return {
     alerts = {
         enabled    = true,  -- false turns off alerts completely (no polygons, list or sounds)
         sounds     = true,  -- false keeps the polygons and list but never plays a sound
-        radius_km  = 300,   -- only alerts this close to the radar (0 = whole country)
+        radius_km  = 300,   -- list and sound alerts this close to the radar (0 = whole country);
+                            -- every alert in the country is drawn on the map
         volume     = 0.8,
         on_startup = false, -- also sound alerts that were already active when the app opened
         rules = {

@@ -38,6 +38,21 @@ pub enum Msg {
     },
     Radio(Result<Vec<Station>, String>),
     Outlook(Result<crate::spc::Outlook, String>),
+    /// The live volume folder for a site in the chunks bucket: (number, volume stamp).
+    ChunkFound {
+        site: String,
+        found: Result<(u16, String), String>,
+    },
+    /// Chunk keys in one volume folder.
+    ChunkList {
+        site: String,
+        num: u16,
+        keys: Result<Vec<String>, String>,
+    },
+    Chunk {
+        key: String,
+        bytes: Result<Vec<u8>, String>,
+    },
     /// A radar file the user opened (dropped, picked, or passed on the command line).
     Local {
         name: String,
@@ -89,6 +104,135 @@ impl Net {
             });
             me.send(Msg::Listing { site, keys });
         });
+    }
+
+    /// List one volume folder of the chunks bucket (keys after `after`, sorted).
+    fn chunk_keys(
+        site: &str,
+        num: u16,
+        after: &str,
+        done: impl 'static + Send + FnOnce(Result<Vec<String>, String>),
+    ) {
+        let mut url = format!("{}/?list-type=2&prefix={site}/{num}/", crate::chunks::BUCKET);
+        if !after.is_empty() {
+            url += &format!("&start-after={after}");
+        }
+        ehttp::fetch(ehttp::Request::get(url), move |res| {
+            done(res.and_then(|r| {
+                if !r.ok {
+                    return Err(format!("live data: HTTP {}", r.status));
+                }
+                Ok(crate::chunks::listing_keys(r.text().unwrap_or_default()))
+            }))
+        });
+    }
+
+    /// List a volume folder of the chunks bucket.
+    pub fn chunk_list(&self, site: &str, num: u16, after: &str) {
+        let me = self.clone();
+        let s = site.to_string();
+        Self::chunk_keys(site, num, after, move |keys| {
+            me.send(Msg::ChunkList { site: s, num, keys })
+        });
+    }
+
+    /// Download one chunk.
+    pub fn chunk(&self, key: &str) {
+        let me = self.clone();
+        let key = key.to_string();
+        let url = format!("{}/{key}", crate::chunks::BUCKET);
+        ehttp::fetch(ehttp::Request::get(url), move |res| {
+            let bytes = res.and_then(|r| {
+                if r.ok {
+                    Ok(r.bytes)
+                } else {
+                    Err(format!("live data: HTTP {}", r.status))
+                }
+            });
+            me.send(Msg::Chunk { key, bytes });
+        });
+    }
+
+    /// Find the folder the radar is writing to now. Folders are numbered 1..=999 and
+    /// reused in turn, so the newest volume in each, read around the circle, goes up
+    /// and then drops once. Requests are slow (~1–2 s) but cheap, so it's two rounds
+    /// in parallel: 40 folders spread around the circle, then every folder in the gap
+    /// after the newest of those (the current folder is in there).
+    pub fn chunk_find(&self, site: &str) {
+        use crate::chunks::{MAX_NUM, parse_key};
+        type Done = Box<dyn FnOnce(Result<Vec<(u16, String)>, String>) + Send>;
+        // newest volume stamp in each folder ("" when empty)
+        fn newest_of(site: &str, nums: Vec<u16>, done: Done) {
+            let n = nums.len();
+            let st = Arc::new(std::sync::Mutex::new((Vec::new(), 0usize, None, Some(done))));
+            for num in nums {
+                let st = st.clone();
+                Net::chunk_keys(site, num, "", move |r| {
+                    let mut g = st.lock().unwrap();
+                    match r {
+                        Ok(keys) => {
+                            let t = keys.iter().filter_map(|k| parse_key(k)).map(|c| c.stamp).max();
+                            g.0.push((num, t.unwrap_or_default()));
+                        }
+                        Err(e) => {
+                            g.2 = Some(e);
+                        }
+                    }
+                    g.1 += 1;
+                    if g.1 == n
+                        && let Some(done) = g.3.take()
+                    {
+                        let res = std::mem::take(&mut g.0);
+                        let err = g.2.take();
+                        drop(g);
+                        // a few failed folders are fine; all of them failing isn't
+                        match err {
+                            Some(e) if res.is_empty() => done(Err(e)),
+                            _ => done(Ok(res)),
+                        }
+                    }
+                });
+            }
+        }
+        let newest = |r: &[(u16, String)]| r.iter().max_by(|a, b| a.1.cmp(&b.1)).cloned();
+        const SAMPLES: u16 = 40;
+        let gap = MAX_NUM.div_ceil(SAMPLES);
+        let me = self.clone();
+        let site = site.to_string();
+        let s2 = site.clone();
+        let first: Vec<u16> = (0..SAMPLES).map(|i| 1 + i * gap).filter(|n| *n <= MAX_NUM).collect();
+        newest_of(
+            &site,
+            first,
+            Box::new(move |r| {
+                let fail = |me: &Net, site: String, e: String| {
+                    me.send(Msg::ChunkFound { site, found: Err(e) })
+                };
+                let best = match r.map(|r| newest(&r)) {
+                    Ok(Some(b)) if !b.1.is_empty() => b,
+                    Ok(_) => return fail(&me, s2, "no live data for this radar".into()),
+                    Err(e) => return fail(&me, s2, e),
+                };
+                let rest: Vec<u16> = (1..gap)
+                    .map(|i| best.0 + i)
+                    .filter(|n| *n <= MAX_NUM)
+                    .collect();
+                let site = s2.clone();
+                newest_of(
+                    &s2,
+                    rest,
+                    Box::new(move |r| {
+                        let mut all = r.unwrap_or_default();
+                        all.push(best);
+                        let (num, stamp) = newest(&all).unwrap();
+                        me.send(Msg::ChunkFound {
+                            site,
+                            found: Ok((num, stamp)),
+                        });
+                    }),
+                );
+            }),
+        );
     }
 
     /// Stream a volume: report progress, and hand over the sweeps decoded so far
@@ -333,6 +477,14 @@ impl Net {
 }
 
 // ---- time helpers ----------------------------------------------------------------
+
+/// Seconds since the Unix epoch, with the fraction.
+pub fn now_f64() -> f64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
 
 pub fn now() -> i64 {
     web_time::SystemTime::now()

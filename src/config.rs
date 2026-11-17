@@ -419,6 +419,8 @@ pub struct Config {
     pub site: String,
     pub live: bool,
     pub refresh_seconds: f64,
+    /// follow the radar in real time through the chunks bucket
+    pub realtime: bool,
     pub tilt: f32,
     pub vel_units: VelUnits,
     pub panes: Vec<Moment>,
@@ -756,8 +758,8 @@ impl Config {
 
         let outlook = {
             let day = sub("outlook", "day").num().unwrap_or(1.0);
-            if !(1.0..=3.0).contains(&day) || day.fract() != 0.0 {
-                return Err(format!("outlook.day: {day} (1, 2 or 3)"));
+            if !(1.0..=8.0).contains(&day) || day.fract() != 0.0 {
+                return Err(format!("outlook.day: {day} (1 to 8)"));
             }
             let day = day as u8;
             let show = match sub("outlook", "show") {
@@ -774,7 +776,7 @@ impl Config {
                     })?;
                     if !crate::spc::Kind::for_day(day).contains(&kind) {
                         return Err(format!(
-                            "outlook.show: SPC has no {s:?} outlook for day {day} (day 3 has categorical and severe)"
+                            "outlook.show: SPC has no {s:?} outlook for day {day} (day 3 has categorical and severe, days 4-8 only severe)"
                         ));
                     }
                     Some(crate::spc::Sel { day, kind })
@@ -837,6 +839,7 @@ impl Config {
             site: pick("site").str().unwrap_or("KTLX").to_uppercase(),
             live: pick("live").bool().unwrap_or(true),
             refresh_seconds: pick("refresh_seconds").num().unwrap_or(60.0).max(15.0),
+            realtime: pick("realtime").bool().unwrap_or(true),
             tilt: pick("tilt").num().unwrap_or(0.5) as f32,
             vel_units: match pick("velocity_units").str().unwrap_or("kt") {
                 "mph" => VelUnits::Mph,

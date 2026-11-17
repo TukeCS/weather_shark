@@ -97,17 +97,15 @@ impl App {
                     "map" => self.map_menu(ui),
                     "events" => self.events_menu(ui),
                     "alerts" if self.cfg.alerts.enabled => {
-                        let listed: Vec<_> = self
-                            .alerts
-                            .iter()
-                            .filter(|(a, r)| {
-                                self.cfg.alerts.rules[*r].list && !self.hidden.contains(&a.id)
-                            })
+                        let listed: Vec<usize> = self
+                            .listed_alerts()
+                            .filter(|(_, a)| !self.hidden.contains(&a.id))
+                            .map(|(i, _)| i)
                             .collect();
                         let n = listed.len();
                         let warn = listed
                             .first()
-                            .map(|(_, r)| self.cfg.alerts.rules[*r].color.to_opaque())
+                            .map(|&i| self.cfg.alerts.rules[self.alerts[i].1].color.to_opaque())
                             .unwrap_or(t.muted);
                         let txt = RichText::new(format!("alerts {n}")).color(if n > 0 {
                             warn
@@ -120,6 +118,14 @@ impl App {
                             txt,
                             "active warnings and watches near this radar",
                         );
+                        let tor = self.tornado_total();
+                        if tor > 0 {
+                            ui.label(RichText::new(format!("TOR {tor}")).color(LIVE_RED).strong())
+                                .on_hover_text(format!(
+                                    "{tor} tornado warning{} in effect across the US",
+                                    if tor == 1 { "" } else { "s" }
+                                ));
+                        }
                     }
                     "radio" if self.cfg.radio.enabled => {
                         let txt = match &self.playing {
@@ -182,6 +188,13 @@ impl App {
                 ui.label(net::fmt_time(s.vol.time));
                 let tag = if s.key.starts_with("file:") {
                     "file".into()
+                } else if s.key.starts_with("live:") {
+                    match s.vol.antenna {
+                        Some(a) if net::now_f64() - a.time < 60.0 => {
+                            format!("scanning {:.1}°", a.elevation)
+                        }
+                        _ => "real time".into(),
+                    }
                 } else if age < 172_800 {
                     net::fmt_age(age)
                 } else {
@@ -259,6 +272,7 @@ impl App {
                     .on_hover_text(
                         "tornado / severe thunderstorm watches, as dashed county outlines",
                     );
+                self.alert_types_menu(ui);
                 self.outlook_menu(ui);
                 if let Some(e) = &self.tiles.error {
                     ui.colored_label(ERR, e);
@@ -269,6 +283,51 @@ impl App {
                             .small(),
                     );
                 }
+            });
+    }
+
+    /// One checkbox per alert event that has a rule: switch a kind of alert off
+    /// (map, list and sound) without editing the Lua.
+    fn alert_types_menu(&mut self, ui: &mut Ui) {
+        if !self.cfg.alerts.enabled || self.cfg.alerts.rules.is_empty() {
+            return;
+        }
+        // unique events in rule order, coloured like their first rule
+        let mut events: Vec<(String, Color32)> = Vec::new();
+        for r in &self.cfg.alerts.rules {
+            if !events.iter().any(|(e, _)| e == &r.event) {
+                events.push((r.event.clone(), r.color.to_opaque()));
+            }
+        }
+        let off = events.iter().filter(|(e, _)| self.off_events.contains(e)).count();
+        let title = if off > 0 {
+            format!("alert types ({} of {} on)", events.len() - off, events.len())
+        } else {
+            "alert types".to_string()
+        };
+        egui::CollapsingHeader::new(title)
+            .id_salt("alert_types")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.small_button("all").clicked() {
+                        self.off_events.clear();
+                    }
+                    if ui.small_button("none").clicked() {
+                        self.off_events = events.iter().map(|(e, _)| e.clone()).collect();
+                    }
+                });
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    for (ev, col) in &events {
+                        let mut on = !self.off_events.contains(ev);
+                        if ui.checkbox(&mut on, RichText::new(ev).color(*col)).changed() {
+                            if on {
+                                self.off_events.remove(ev);
+                            } else {
+                                self.off_events.insert(ev.clone());
+                            }
+                        }
+                    }
+                });
             });
     }
 
@@ -283,12 +342,18 @@ impl App {
         let cur = self.show.outlook;
         let day = cur.map_or(0, |s| s.day);
         let kind = cur.map_or(self.outlook_last.kind, |s| s.kind);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.selectable_label(cur.is_none(), "off").clicked() {
                 self.show.outlook = None;
             }
-            for d in 1..=3u8 {
-                if ui.selectable_label(day == d, format!("day {d}")).clicked() {
+            ui.label(RichText::new("day").color(muted).small());
+            for d in 1..=8u8 {
+                let hint = if d >= 4 {
+                    "15% / 30% chance of severe weather (SPC's day 4–8 outlook)"
+                } else {
+                    "categorical risk and probabilities"
+                };
+                if ui.selectable_label(day == d, d.to_string()).on_hover_text(hint).clicked() {
                     self.show.outlook = Some(Sel {
                         day: d,
                         kind: kind.on_day(d),
@@ -476,24 +541,32 @@ impl App {
         if let Some(e) = &self.alerts_error {
             ui.colored_label(ERR, e);
         }
-        if self.alerts.is_empty() {
-            ui.label(
-                RichText::new(format!(
-                    "nothing within {:.0} km of {}",
-                    self.cfg.alerts.radius_km, self.site
-                ))
-                .color(t.muted),
-            );
-        }
+        let tor = self.tornado_total();
+        let tor_near = self
+            .listed_alerts()
+            .filter(|(_, a)| super::is_real_tornado(a))
+            .count();
+        ui.label(
+            RichText::new(format!(
+                "tornado warnings: {tor} in the US, {tor_near} near {}",
+                self.site
+            ))
+            .color(if tor > 0 { LIVE_RED } else { t.muted }),
+        );
         let mut focus = None;
         let mut action: Option<(CardAction, String)> = None;
         let listed: Vec<(usize, bool)> = self
-            .alerts
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, r))| self.cfg.alerts.rules[*r].list)
-            .map(|(i, (a, _))| (i, self.hidden.contains(&a.id)))
+            .listed_alerts()
+            .map(|(i, a)| (i, self.hidden.contains(&a.id)))
             .collect();
+        if listed.is_empty() {
+            let msg = if self.cfg.alerts.radius_km > 0.0 {
+                format!("nothing within {:.0} km of {}", self.cfg.alerts.radius_km, self.site)
+            } else {
+                "no active alerts".to_string()
+            };
+            ui.label(RichText::new(msg).color(t.muted));
+        }
         egui::ScrollArea::vertical().show(ui, |ui| {
             for &(i, _) in listed.iter().filter(|(_, hidden)| !hidden) {
                 if let Some(a) = self.alert_card(ui, i, false) {

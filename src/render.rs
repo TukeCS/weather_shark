@@ -74,9 +74,8 @@ pub fn rasterize(
 
     let mut px = vec![Color32::TRANSPARENT; size * size];
     let km_per_px = 2.0 * range / size as f32;
-    for j in 0..size {
+    let fill_row = |j: usize, row: &mut [Color32]| {
         let y = range - (j as f32 + 0.5) * km_per_px;
-        let row = &mut px[j * size..(j + 1) * size];
         for (i, out) in row.iter_mut().enumerate() {
             let x = (i as f32 + 0.5) * km_per_px - range;
             let r2 = x * x + y * y;
@@ -113,6 +112,26 @@ pub fn rasterize(
                 },
             };
         }
+    };
+    // rows are independent: split them over the cores (the web build has one thread)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(16);
+        let per = size.div_ceil(threads).max(1);
+        std::thread::scope(|sc| {
+            for (b, block) in px.chunks_mut(per * size).enumerate() {
+                let fill_row = &fill_row;
+                sc.spawn(move || {
+                    for (k, row) in block.chunks_mut(size).enumerate() {
+                        fill_row(b * per + k, row);
+                    }
+                });
+            }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    for (j, row) in px.chunks_mut(size).enumerate() {
+        fill_row(j, row);
     }
     ColorImage::new([size, size], px)
 }

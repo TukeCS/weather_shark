@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod alerts;
+mod chunks;
 mod app;
 mod config;
 mod level2;

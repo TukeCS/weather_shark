@@ -23,17 +23,22 @@ i got tired of paying subscriptions
 ## Features
 
 - Real data from NOAA's public NEXRAD archive on AWS (live, or any past scan back to the 2000s)
+- Real time: live mode streams each scan from Unidata's real-time feed as the radar sends it, so
+  you're seconds behind instead of the 5–10 minutes it takes for a finished scan to be archived.
+  Each tilt updates as soon as the radar has scanned it, drawn over the previous scan
 - Products: reflectivity, velocity, correlation coefficient, ZDR, spectrum width, PHI
 - Starts with one pane; each pane you add splits the last one in a fibonacci spiral (like dwm/trwm),
-  up to 6. Every pane shares pan/zoom and a crosshair that reads out the value under it
+  up to 6; drag the gap between two panes to resize them (double-click it to reset). Every pane shares pan/zoom and a crosshair that reads out the value under it
 - A chase map: roads down to street level, interstate and US highway numbers, and town names from
   OpenStreetMap, plus state and county lines. Every layer can be toggled
 - Click any radar site on the map to switch to it, or search by name
 - Live NWS warnings drawn as their storm polygons; watches drawn as the counties they cover.
-  You pick which kinds show up, and each can play its own sound (the TV / radio Emergency Alert
+  Every active alert in the country is drawn at once; the list and sounds stick to the ones near
+  your radar, and the toolbar counts tornado warnings nationwide. Each kind can be switched off from
+  the map menu, and each can play its own sound (the TV / radio Emergency Alert
   System tone for tornadoes by default). A "simulate" button previews your warning colours and sounds
-- SPC convective outlooks for days 1–3: categorical risk (MRGL … HIGH) or the tornado, wind and
-  hail probabilities, with the significant (hatched) area dashed. Outline only, filled, or any
+- SPC convective outlooks for days 1–8: categorical risk (MRGL … HIGH) or the tornado, wind and
+  hail probabilities (days 4–8: the 15% / 30% severe areas), with the significant (hatched) area dashed. Outline only, filled, or any
   colour per risk level, all set in Lua. Watches and warnings each have their own switch
 - NOAA Weather Radio: live streams from the transmitters nearest your radar
 - Bookmarks for past events (Moore, El Reno, Joplin, Mayfield, Rolling Fork)

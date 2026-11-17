@@ -19,6 +19,8 @@ pub struct Alert {
     pub counties: Vec<u32>,
     /// True when the outline came from county borders rather than an NWS polygon.
     pub county_based: bool,
+    /// Within `alerts.radius_km` of the radar: listed and sounded. Every alert is drawn.
+    pub near: bool,
 }
 
 impl Alert {
@@ -159,14 +161,15 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Alert>, String> {
                     })
                     .unwrap_or_default(),
                 county_based: false,
+                near: true,
             })
         })
         .collect())
 }
 
-/// Keep the alerts that have a rule and are near the radar, paired with the index of
-/// the first rule that matches (rules are in priority order). Watches come without a
-/// polygon, so they get the outlines of their counties from `county`.
+/// Keep the alerts that have a rule, paired with the index of the first rule that
+/// matches (rules are in priority order), and mark the ones near the radar. Watches
+/// come without a polygon, so they get the outlines of their counties from `county`.
 pub fn select(
     list: Vec<Alert>,
     rules: &[AlertRule],
@@ -182,11 +185,11 @@ pub fn select(
                     al.polygons = al.counties.iter().flat_map(|c| county(*c)).collect();
                     al.county_based = true;
                 }
-                let near = radius_km <= 0.0
+                al.near = radius_km <= 0.0
                     || al.polygons.iter().flatten().any(|&(lon, lat)| {
                         proj.fwd(lon, lat).to_vec2().length() as f64 <= radius_km
                     });
-                near.then_some((al, rule))
+                Some((al, rule))
             })
             .collect();
     kept.sort_by_key(|(_, r)| *r);
@@ -260,9 +263,12 @@ mod tests {
         );
         let ids: Vec<&str> = kept.iter().map(|(a, _)| a.id.as_str()).collect();
 
-        // flash floods have a rule in the default config; Florida is far from KTLX
+        // flash floods have a rule in the default config; Florida is far from KTLX,
+        // so it's kept (drawn on the map) but not near
         assert!(ids.contains(&"ffw-1"));
-        assert!(!ids.contains(&"tor-florida"));
+        let fl = kept.iter().find(|(a, _)| a.id == "tor-florida").unwrap();
+        assert!(!fl.0.near);
+        assert!(kept.iter().find(|(a, _)| a.id == "ffw-1").unwrap().0.near);
         // most important first: the confirmed tornado uses the "observed" rule, not the emergency one
         assert_eq!(ids[0], "tor-moore");
         let rule = &cfg.alerts.rules[kept[0].1];
@@ -377,8 +383,8 @@ mod tests {
         );
         let ids: Vec<&str> = kept.iter().map(|(a, _)| a.id.as_str()).collect();
         assert!(
-            ids.contains(&"tor-florida"),
-            "radius 0 keeps alerts anywhere"
+            kept.iter().any(|(a, _)| a.id == "tor-florida" && a.near),
+            "radius 0 counts alerts anywhere as near"
         );
         assert!(ids.contains(&"ffw-1"), "adding a rule shows that event");
         assert!(
