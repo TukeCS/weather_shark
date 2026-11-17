@@ -472,7 +472,25 @@ impl App {
                         {
                             close = true;
                         }
+                        // speeds: the unit is a button that cycles kt → mph → km/h → m/s
+                        // (also set in the map menu); shown even with no value under the cursor
+                        let speed = matches!(m, Moment::Vel | Moment::Sw);
+                        if speed
+                            && ui
+                                .small_button(egui::RichText::new(self.speed.label()).color(t.accent))
+                                .on_hover_text("units: click to switch (kt, mph, km/h, m/s)")
+                                .clicked()
+                        {
+                            use crate::config::VelUnits;
+                            let i = VelUnits::ALL.iter().position(|u| *u == self.speed).unwrap_or(0);
+                            self.speed = VelUnits::ALL[(i + 1) % VelUnits::ALL.len()];
+                        }
                         if let Some(r) = readout {
+                            let r = if speed {
+                                r.trim_end_matches(self.speed.label()).trim_end().to_string()
+                            } else {
+                                r
+                            };
                             ui.label(egui::RichText::new(r).color(t.fg));
                         }
                     });
