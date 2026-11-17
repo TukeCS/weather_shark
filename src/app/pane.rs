@@ -87,6 +87,14 @@ impl App {
             self.draw_roads(&painter, rect, &tiles, true);
         }
 
+        // SPC outlook fill, under the radar so echoes keep their colours
+        if let Some(o) = self
+            .outlook_shown()
+            .filter(|_| self.cfg.outlook.fill_under_radar)
+        {
+            self.draw_outlook_fill(&painter, rect, o);
+        }
+
         // radar image
         if let Some((tex, range)) = self.texture(ui.ctx(), m) {
             let a = self.to_screen(rect, pos2(-range, range));
@@ -114,7 +122,13 @@ impl App {
                 painter.circle_stroke(o, r as f32 * self.zoom, Stroke::new(1.0, c));
             }
         }
-        if self.show.warnings && self.cfg.alerts.enabled {
+        if let Some(o) = self.outlook_shown() {
+            if !self.cfg.outlook.fill_under_radar {
+                self.draw_outlook_fill(&painter, rect, o);
+            }
+            self.draw_outlook_lines(&painter, rect, o);
+        }
+        if (self.show.warnings || self.show.watches) && self.cfg.alerts.enabled {
             self.draw_warnings(&painter, rect);
         }
         self.draw_labels(&painter, rect, &tiles);
@@ -361,6 +375,29 @@ impl App {
             );
         }
 
+        if let Some(o) = self.outlook_shown()
+            && rect.width() > 300.0
+        {
+            let (_, _, d) = crate::net::civil_from_days(o.expire.div_euclid(86400));
+            let text = format!(
+                "SPC day {} {} · until {:02}Z on the {d}{}",
+                o.sel.day,
+                o.sel.kind.name(),
+                o.expire.rem_euclid(86400) / 3600,
+                if o.areas.is_empty() {
+                    " · no risk areas"
+                } else {
+                    ""
+                },
+            );
+            painter.text(
+                rect.right_bottom() - vec2(10.0, 22.0),
+                Align2::RIGHT_BOTTOM,
+                text,
+                small.clone(),
+                t.muted,
+            );
+        }
         if (self.show.roads || self.show.cities)
             && self.tiles.template.is_some()
             && rect.width() > 420.0

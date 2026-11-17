@@ -250,7 +250,16 @@ impl App {
                 ui.checkbox(&mut self.show.counties, "counties");
                 ui.checkbox(&mut self.show.rings, "range rings");
                 ui.checkbox(&mut self.show.sites, "radar sites");
-                ui.checkbox(&mut self.show.warnings, "warnings & watches");
+                let (wk, ak) = (
+                    self.key_hint(Action::Warnings),
+                    self.key_hint(Action::Watches),
+                );
+                ui.checkbox(&mut self.show.warnings, format!("warnings{wk}"));
+                ui.checkbox(&mut self.show.watches, format!("watches{ak}"))
+                    .on_hover_text(
+                        "tornado / severe thunderstorm watches, as dashed county outlines",
+                    );
+                self.outlook_menu(ui);
                 if let Some(e) = &self.tiles.error {
                     ui.colored_label(ERR, e);
                 } else if self.tiles.failed_count() > 0 {
@@ -261,6 +270,67 @@ impl App {
                     );
                 }
             });
+    }
+
+    fn outlook_menu(&mut self, ui: &mut Ui) {
+        use crate::spc::{Kind, Sel};
+        let muted = self.cfg.theme.muted;
+        heading(
+            ui,
+            &format!("SPC OUTLOOK{}", self.key_hint(Action::Outlook)),
+            muted,
+        );
+        let cur = self.show.outlook;
+        let day = cur.map_or(0, |s| s.day);
+        let kind = cur.map_or(self.outlook_last.kind, |s| s.kind);
+        ui.horizontal(|ui| {
+            if ui.selectable_label(cur.is_none(), "off").clicked() {
+                self.show.outlook = None;
+            }
+            for d in 1..=3u8 {
+                if ui.selectable_label(day == d, format!("day {d}")).clicked() {
+                    self.show.outlook = Some(Sel {
+                        day: d,
+                        kind: kind.on_day(d),
+                    });
+                }
+            }
+        });
+        if let Some(sel) = cur {
+            ui.horizontal_wrapped(|ui| {
+                for &k in Kind::for_day(sel.day) {
+                    if ui.selectable_label(sel.kind == k, k.name()).clicked() {
+                        self.show.outlook = Some(Sel { kind: k, ..sel });
+                    }
+                }
+            });
+            let small = |s: String| RichText::new(s).color(muted).small();
+            if let Some(e) = &self.outlook_error {
+                ui.colored_label(ERR, e);
+            } else if let Some(o) = self.outlook.as_ref().filter(|o| o.sel == sel) {
+                if self.outlook_shown().is_none() {
+                    ui.label(small(
+                        "hidden: this scan is from outside the outlook's time".into(),
+                    ));
+                } else if o.areas.is_empty() {
+                    ui.label(small("no risk areas in this outlook".into()));
+                }
+                ui.label(small(format!(
+                    "valid {} – {}",
+                    net::fmt_time(o.valid),
+                    net::fmt_time(o.expire)
+                )));
+                for a in o.areas.iter().rev() {
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
+                        ui.painter().rect_filled(r, 2, a.color);
+                        ui.label(RichText::new(&a.name).small());
+                    });
+                }
+            } else {
+                ui.label(small("loading…".into()));
+            }
+        }
     }
 
     fn events_menu(&mut self, ui: &mut Ui) {
@@ -337,7 +407,7 @@ impl App {
                 self.editor_dirty = true;
             }
             ui.label(RichText::new("test:").color(t.muted));
-            for s in ["siren", "alarm", "beep", "chime"] {
+            for s in crate::sound::SOUNDS {
                 if ui.small_button(s).clicked() {
                     self.player.play(s, None, 1, self.cfg.alerts.volume);
                 }

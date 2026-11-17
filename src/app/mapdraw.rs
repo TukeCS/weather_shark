@@ -316,6 +316,10 @@ impl App {
             if !self.cfg.alerts.rules[*r].map || self.hidden.contains(&al.id) {
                 continue;
             }
+            let watch = al.is_watch();
+            if (watch && !self.show.watches) || (!watch && !self.show.warnings) {
+                continue;
+            }
             let col = self.cfg.alerts.rules[*r].color;
             for poly in &al.polygons {
                 let pts: Vec<Pos2> = poly
@@ -326,7 +330,7 @@ impl App {
                     continue;
                 }
                 if al.county_based {
-                    // watches: dashed county outlines
+                    // no NWS polygon (watches, winter warnings …): dashed county outlines
                     painter.extend(Shape::dashed_line(&pts, Stroke::new(1.5, col), 6.0, 4.0));
                 } else {
                     // warnings: solid polygon with a dark edge so it reads over radar
@@ -335,6 +339,111 @@ impl App {
                         Stroke::new(4.0, self.cfg.theme.bg.gamma_multiply(0.7)),
                     ));
                     painter.add(Shape::closed_line(pts, Stroke::new(2.0, col)));
+                }
+            }
+        }
+    }
+
+    /// SPC outlook fills: each level's area as triangles, higher risks on top.
+    pub(super) fn draw_outlook_fill(&self, painter: &Painter, rect: Rect, o: &crate::spc::Outlook) {
+        let view = rect.expand(rect.width().max(rect.height()));
+        for area in &o.areas {
+            let Some(fill) = self
+                .cfg
+                .outlook
+                .style(area.key(), area.color)
+                .and_then(|s| s.fill)
+                .filter(|c| c.a() > 0)
+            else {
+                continue;
+            };
+            let mut mesh = egui::Mesh::default();
+            for &(x, y) in &area.fill_pts {
+                mesh.colored_vertex(self.ll_to_screen(rect, x, y), fill);
+            }
+            for t in area.fill_idx.as_chunks::<3>().0 {
+                let v = |i: u32| mesh.vertices[i as usize].pos;
+                // skip triangles far off screen
+                let tri = Rect::from_points(&[v(t[0]), v(t[1]), v(t[2])]);
+                if tri.intersects(view) {
+                    mesh.add_triangle(t[0], t[1], t[2]);
+                }
+            }
+            if !mesh.indices.is_empty() {
+                painter.add(Shape::mesh(mesh));
+            }
+        }
+    }
+
+    /// SPC outlook outlines (the significant area dashed), each labelled at its
+    /// northernmost point in view.
+    pub(super) fn draw_outlook_lines(
+        &self,
+        painter: &Painter,
+        rect: Rect,
+        o: &crate::spc::Outlook,
+    ) {
+        let oc = &self.cfg.outlook;
+        let halo = self.cfg.theme.bg.gamma_multiply(0.7);
+        let font = FontId::monospace(oc.label_size);
+        let w = oc.width;
+        let mut placed: Vec<Rect> = Vec::new();
+        for area in &o.areas {
+            let Some(style) = oc.style(area.key(), area.color) else {
+                continue;
+            };
+            let line = style.line.filter(|c| c.a() > 0 && w > 0.0);
+            // labels take the line colour, or the fill's when there are no lines
+            let label = style.line.or(style.fill).map(|c| c.to_opaque());
+            for ring in &area.rings {
+                let mut pts =
+                    self.screen_line(rect, ring.iter().map(|&(x, y)| self.map.proj.fwd(x, y)));
+                if pts.len() < 3 {
+                    continue;
+                }
+                if let Some(c) = line {
+                    if area.sig {
+                        pts.push(pts[0]);
+                        painter.extend(Shape::dashed_line(
+                            &pts,
+                            Stroke::new(w + 1.5, halo),
+                            7.0,
+                            5.0,
+                        ));
+                        painter.extend(Shape::dashed_line(&pts, Stroke::new(w, c), 7.0, 5.0));
+                    } else {
+                        painter.add(Shape::closed_line(pts.clone(), Stroke::new(w + 2.0, halo)));
+                        painter.add(Shape::closed_line(pts.clone(), Stroke::new(w, c)));
+                    }
+                }
+                let Some(lc) = label.filter(|_| oc.labels) else {
+                    continue;
+                };
+                // below the pane header, above the legend
+                let inner =
+                    Rect::from_min_max(rect.min + vec2(16.0, 48.0), rect.max - vec2(16.0, 48.0));
+                let Some(top) = pts
+                    .iter()
+                    .filter(|p| inner.contains(**p))
+                    .min_by(|a, b| a.y.total_cmp(&b.y))
+                    .copied()
+                else {
+                    continue;
+                };
+                let galley = painter.layout_no_wrap(area.label.clone(), font.clone(), lc);
+                let r = Rect::from_center_size(top + vec2(0.0, oc.label_size), galley.size())
+                    .expand(2.0);
+                if rect.contains_rect(r) && !placed.iter().any(|q| q.intersects(r)) {
+                    placed.push(r);
+                    halo_text(
+                        painter,
+                        r.center(),
+                        Align2::CENTER_CENTER,
+                        &area.label,
+                        font.clone(),
+                        lc,
+                        self.cfg.theme.bg,
+                    );
                 }
             }
         }

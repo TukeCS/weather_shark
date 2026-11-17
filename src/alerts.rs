@@ -22,6 +22,11 @@ pub struct Alert {
 }
 
 impl Alert {
+    /// Tornado / severe thunderstorm / flash flood / winter storm … watches.
+    pub fn is_watch(&self) -> bool {
+        self.event.to_ascii_lowercase().ends_with(" watch")
+    }
+
     pub fn confirmed(&self) -> bool {
         self.tornado
             .as_deref()
@@ -72,8 +77,20 @@ impl Alert {
             .is_some_and(|d| d.eq_ignore_ascii_case("considerable"))
         {
             Some("PDS")
+        } else if self
+            .damage
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case("destructive"))
+        {
+            Some("DESTRUCTIVE")
         } else if self.confirmed() {
             Some("CONFIRMED")
+        } else if self
+            .tornado
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("possible"))
+        {
+            Some("TOR POSSIBLE")
         } else {
             None
         }
@@ -125,7 +142,12 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Alert>, String> {
                 area: s(p, "areaDesc"),
                 expires: s(p, "expires"),
                 tornado: first_param(&params, "tornadoDetection"),
-                damage: first_param(&params, "tornadoDamageThreat"),
+                // tornado: considerable (PDS) / catastrophic (emergency); severe
+                // thunderstorm: considerable / destructive; flash flood: considerable /
+                // catastrophic (flash flood emergency)
+                damage: first_param(&params, "tornadoDamageThreat")
+                    .or_else(|| first_param(&params, "thunderstormDamageThreat"))
+                    .or_else(|| first_param(&params, "flashFloodDamageThreat")),
                 hail: first_param(&params, "maxHailSize").and_then(|h| h.trim().parse().ok()),
                 polygons,
                 counties: p["geocode"]["SAME"]
@@ -238,14 +260,14 @@ mod tests {
         );
         let ids: Vec<&str> = kept.iter().map(|(a, _)| a.id.as_str()).collect();
 
-        // no rule for flash floods in the default config, and Florida is far from KTLX
-        assert!(!ids.contains(&"ffw-1"));
+        // flash floods have a rule in the default config; Florida is far from KTLX
+        assert!(ids.contains(&"ffw-1"));
         assert!(!ids.contains(&"tor-florida"));
         // most important first: the confirmed tornado uses the "observed" rule, not the emergency one
         assert_eq!(ids[0], "tor-moore");
         let rule = &cfg.alerts.rules[kept[0].1];
         assert_eq!(rule.tornado.as_deref(), Some("observed"));
-        assert_eq!(rule.sound, "siren");
+        assert_eq!(rule.sound, "wea");
         // 2.5" hail takes the hail rule ahead of the plain severe rule
         let svr = kept.iter().find(|(a, _)| a.id == "svr-1").unwrap();
         assert_eq!(cfg.alerts.rules[svr.1].hail, Some(2.0));
@@ -282,6 +304,60 @@ mod tests {
             lon / n,
             lat / n
         );
+    }
+
+    #[test]
+    fn damage_threats_from_every_kind_of_warning() {
+        let doc = r#"{ "features": [
+          { "geometry": { "type": "Polygon", "coordinates": [[[-97.5,35.4],[-97.4,35.45],[-97.35,35.4],[-97.5,35.4]]] },
+            "properties": { "id": "ffe", "event": "Flash Flood Warning", "parameters": { "flashFloodDamageThreat": ["CATASTROPHIC"] } } },
+          { "geometry": { "type": "Polygon", "coordinates": [[[-97.5,35.4],[-97.4,35.45],[-97.35,35.4],[-97.5,35.4]]] },
+            "properties": { "id": "svr", "event": "Severe Thunderstorm Warning", "parameters": { "thunderstormDamageThreat": ["DESTRUCTIVE"] } } },
+          { "geometry": null,
+            "properties": { "id": "bz", "event": "Blizzard Warning", "parameters": {}, "geocode": { "SAME": ["040109"] } } }
+        ] }"#;
+        let cfg = Config::default_config();
+        let map = Basemap::new(35.333, -97.278);
+        let kept = select(
+            parse(doc.as_bytes()).unwrap(),
+            &cfg.alerts.rules,
+            300.0,
+            &ktlx(),
+            |f| map.county(f),
+        );
+        let get = |id: &str| kept.iter().find(|(a, _)| a.id == id).unwrap();
+        let (ffe, r) = get("ffe");
+        assert_eq!(ffe.tag(), Some("EMERGENCY"));
+        assert_eq!(cfg.alerts.rules[*r].damage.as_deref(), Some("catastrophic"));
+        let (svr, r) = get("svr");
+        assert_eq!(svr.tag(), Some("DESTRUCTIVE"));
+        assert_eq!(cfg.alerts.rules[*r].damage.as_deref(), Some("destructive"));
+        let (bz, _) = get("bz");
+        assert!(
+            bz.county_based && !bz.is_watch(),
+            "a county-based warning is still a warning"
+        );
+    }
+
+    #[test]
+    fn flash_flood_watches_are_shown_as_counties() {
+        let doc = r#"{ "features": [ { "geometry": null,
+            "properties": { "id": "ffa-1", "event": "Flash Flood Watch", "areaDesc": "Oklahoma; Cleveland",
+              "parameters": {}, "geocode": { "SAME": ["040109", "040027"], "UGC": ["OKZ025", "OKZ026"] } } } ] }"#;
+        let cfg = Config::default_config();
+        let map = Basemap::new(35.333, -97.278);
+        let kept = select(
+            parse(doc.as_bytes()).unwrap(),
+            &cfg.alerts.rules,
+            300.0,
+            &ktlx(),
+            |f| map.county(f),
+        );
+        let (w, rule) = kept
+            .first()
+            .expect("the default config has a flash flood watch rule");
+        assert_eq!(cfg.alerts.rules[*rule].event, "Flash Flood Watch");
+        assert!(w.county_based && w.polygons.len() >= 2);
     }
 
     #[test]

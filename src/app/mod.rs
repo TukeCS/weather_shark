@@ -52,6 +52,9 @@ struct Toggles {
     rings: bool,
     sites: bool,
     warnings: bool,
+    watches: bool,
+    /// SPC outlook on the map
+    outlook: Option<crate::spc::Sel>,
 }
 
 impl Toggles {
@@ -64,6 +67,8 @@ impl Toggles {
             rings: c.map.range_rings.is_some(),
             sites: true,
             warnings: c.map.warnings,
+            watches: c.map.watches,
+            outlook: c.outlook.show,
         }
     }
 }
@@ -154,6 +159,13 @@ pub struct App {
     /// warnings the user hid from the map (they stay listed under HIDDEN)
     hidden: HashSet<String>,
     player: Player,
+
+    outlook: Option<crate::spc::Outlook>,
+    outlook_error: Option<String>,
+    /// what was last requested, and when
+    outlook_asked: Option<(crate::spc::Sel, f64)>,
+    /// what the outlook key brings back after turning it off
+    outlook_last: crate::spc::Sel,
 
     stations: Vec<Station>,
     radio_error: Option<String>,
@@ -284,6 +296,13 @@ impl App {
             alarm_until: 0.0,
             simulated: Vec::new(),
             hidden: HashSet::new(),
+            outlook: None,
+            outlook_error: None,
+            outlook_asked: None,
+            outlook_last: cfg.outlook.show.unwrap_or(crate::spc::Sel {
+                day: 1,
+                kind: crate::spc::Kind::Categorical,
+            }),
             player: Player::new(),
             stations: Vec::new(),
             radio_error: None,
@@ -658,6 +677,37 @@ impl App {
         self.select_site(&s, None);
     }
 
+    // ---- SPC outlook ---------------------------------------------------------------
+
+    /// Fetch the selected outlook when it changes, and every 10 minutes (SPC updates
+    /// day 1 five times a day).
+    fn poll_outlook(&mut self, now: f64) {
+        let Some(sel) = self.show.outlook else {
+            return;
+        };
+        self.outlook_last = sel;
+        let stale = match self.outlook_asked {
+            Some((s, t)) => s != sel || now - t > 600.0,
+            None => true,
+        };
+        if stale {
+            if self.outlook.as_ref().is_some_and(|o| o.sel != sel) {
+                self.outlook = None;
+            }
+            self.outlook_error = None;
+            self.outlook_asked = Some((sel, now));
+            self.net.outlook(sel);
+        }
+    }
+
+    /// The outlook to draw: loaded, switched on, and in effect at the shown scan's time.
+    fn outlook_shown(&self) -> Option<&crate::spc::Outlook> {
+        let o = self.outlook.as_ref()?;
+        let on = self.show.outlook == Some(o.sel);
+        let t = self.scan.as_ref().map_or(net::now(), |s| s.vol.time);
+        (on && o.covers(t)).then_some(o)
+    }
+
     // ---- alerts ------------------------------------------------------------------
 
     fn poll_alerts(&mut self) {
@@ -848,6 +898,15 @@ impl App {
                 Msg::TileJson(res) => match res {
                     Ok(t) => self.tiles.template = Some(t),
                     Err(e) => self.tiles.error = Some(e),
+                },
+                Msg::Outlook(res) => match res {
+                    // a reply for a selection the user has since changed is dropped
+                    Ok(o) if self.outlook_asked.is_some_and(|(s, _)| s == o.sel) => {
+                        self.outlook_error = None;
+                        self.outlook = Some(o);
+                    }
+                    Ok(_) => {}
+                    Err(e) => self.outlook_error = Some(e),
                 },
                 Msg::Tile { key, tile } => self.tiles.done(key, tile),
                 Msg::Local { name, vol } => match vol {
@@ -1048,6 +1107,13 @@ impl App {
                 Action::Cities => self.show.cities = !self.show.cities,
                 Action::Roads => self.show.roads = !self.show.roads,
                 Action::Warnings => self.show.warnings = !self.show.warnings,
+                Action::Watches => self.show.watches = !self.show.watches,
+                Action::Outlook => {
+                    self.show.outlook = match self.show.outlook {
+                        Some(_) => None,
+                        None => Some(self.outlook_last),
+                    }
+                }
                 Action::Settings => {
                     self.side = if self.side == Side::Settings {
                         Side::None
@@ -1116,6 +1182,7 @@ impl eframe::App for App {
             self.last_alerts = now;
             self.poll_alerts();
         }
+        self.poll_outlook(now);
         if !self.tiles.json_requested && (self.show.roads || self.show.cities) {
             self.tiles.json_requested = true;
             self.net.tilejson(&self.cfg.map.tiles);

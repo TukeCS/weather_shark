@@ -37,6 +37,7 @@ pub enum Msg {
         tile: Result<TileData, String>,
     },
     Radio(Result<Vec<Station>, String>),
+    Outlook(Result<crate::spc::Outlook, String>),
     /// A radar file the user opened (dropped, picked, or passed on the command line).
     Local {
         name: String,
@@ -307,6 +308,20 @@ impl Net {
             });
         }
         Ok(())
+    }
+
+    /// An SPC convective outlook.
+    pub fn outlook(&self, sel: crate::spc::Sel) {
+        let me = self.clone();
+        ehttp::fetch(ehttp::Request::get(sel.url()), move |res| {
+            let o = res.and_then(|r| {
+                if !r.ok {
+                    return Err(format!("SPC outlook: HTTP {}", r.status));
+                }
+                crate::spc::parse(&r.bytes, sel)
+            });
+            me.send(Msg::Outlook(o));
+        });
     }
 
     pub fn radio_list(&self) {

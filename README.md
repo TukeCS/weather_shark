@@ -32,6 +32,9 @@ i got tired of paying subscriptions
 - Live NWS warnings drawn as their storm polygons; watches drawn as the counties they cover.
   You pick which kinds show up, and each can play its own sound (a siren for a confirmed tornado
   by default). A "simulate" button previews your warning colours and sounds
+- SPC convective outlooks for days 1–3: categorical risk (MRGL … HIGH) or the tornado, wind and
+  hail probabilities, with the significant (hatched) area dashed. Outline only, filled, or any
+  colour per risk level, all set in Lua. Watches and warnings each have their own switch
 - NOAA Weather Radio: live streams from the transmitters nearest your radar
 - Bookmarks for past events (Moore, El Reno, Joplin, Mayfield, Rolling Fork)
 - Open your own Level II files: drop one on the window, pass it on the command line, or use

@@ -83,7 +83,7 @@ return {
         --   "map"     map layer switches         "events" bookmarks, go to a time, open a file
         --   "alerts"  warnings list              "radio"  NOAA Weather Radio
         --   "lua"     this file, in an editor
-        toolbar   = { "site", "time", "tilt", "events", "alerts", "radio", "lua" },
+        toolbar   = { "site", "time", "tilt", "map", "events", "alerts", "radio", "lua" },
         header    = true,   -- product picker + title on each pane
         legend    = true,   -- colour scale
         readout   = true,   -- value under the cursor
@@ -106,6 +106,8 @@ return {
         roads      = "M",
         cities     = "C",
         warnings   = "W",
+        watches    = "A",
+        outlook    = "S",       -- SPC outlook on / off (pick the day and kind in "map")
         settings   = "Comma",   -- open this file in the editor
         open       = "O",       -- open a radar file (you can also drop one on the window)
         radio      = "Space",   -- play / stop the nearest NOAA Weather Radio stream
@@ -119,7 +121,9 @@ return {
         site_labels  = true,
         -- every layer can be turned off with false (states, counties, range_rings, roads ...)
         crosshair    = "#ffffffcc",
-        warnings     = true,        -- draw warning polygons / watch counties
+        warnings     = true,        -- draw warning polygons
+        watches      = true,        -- draw tornado / severe thunderstorm watches (dashed counties)
+
 
         -- roads and towns come from OpenStreetMap vector tiles (OpenFreeMap).
         -- Any OpenMapTiles-schema TileJSON URL works here.
@@ -135,6 +139,37 @@ return {
             secondary = "#a8a8b277",
             tertiary  = "#8e8e9566",
             minor     = "#8e8e9540", -- only drawn when zoomed in close
+        },
+    },
+
+    -- SPC convective outlook ---------------------------------------------------
+    -- The Storm Prediction Center's risk areas, drawn on the map. Pick the day and
+    -- kind in the "map" menu, or turn it on / off with the outlook key (S).
+    -- Refreshed every 10 minutes. It is hidden over archived scans from before it
+    -- was issued, so it never shows today's risk over a past event.
+    outlook = {
+        show  = false,  -- on start: false, or "categorical", "tornado", "wind",
+                        -- "hail" (days 1-2) or "severe" (day 3)
+        day   = 1,      -- 1, 2 or 3
+        width = 1.6,    -- outline width; 0 = no outlines
+        fill  = 0,      -- fill opacity 0..1 using SPC's colours (try 0.15); 0 = no fill
+        fill_under_radar = true,  -- false draws the fill over the radar echoes
+        labels     = true,        -- "ENH", "10%" ... on each area
+        label_size = 11,
+
+        -- per-level colours, overriding SPC's. Keys are the level names:
+        --   categorical: TSTM MRGL SLGT ENH MDT HIGH
+        --   probability: ["2%"] ["5%"] ["10%"] ["15%"] ["30%"] ["45%"] ["60%"]
+        --   significant (hatched) area: SIG
+        -- Each one can be
+        --   "#rrggbb" or "#rrggbbaa"            outline colour (fill uses it too, at `fill` opacity)
+        --   { line = "#..", fill = "#..aa" }    separate outline and fill; false for none
+        --   false                               don't draw that level at all
+        -- "#00000000" is fully transparent.
+        colors = {
+            -- TSTM = false,                                -- hide general thunder
+            -- HIGH = { line = "#ff00ff", fill = "#ff00ff40" },
+            -- ["10%"] = "#ffe066",
         },
     },
 
@@ -234,10 +269,15 @@ return {
     --
     -- rule fields (all optional except event):
     --   event    NWS event name, e.g. "Tornado Warning"
-    --   tornado  "observed" (confirmed) or "radar indicated"
-    --   damage   "considerable" (PDS) or "catastrophic" (tornado emergency)
+    --   tornado  "observed" (confirmed), "radar indicated", or "possible"
+    --            (a severe thunderstorm warning that says a tornado is possible)
+    --   damage   "considerable" (PDS), "catastrophic" (tornado / flash flood
+    --            emergency) or "destructive" (severe thunderstorm)
     --   hail     minimum hail size in inches
-    --   sound    "siren", "alarm", "beep", "chime" or "none"
+    --   sound    "wea"    the phone emergency alert (853 + 960 Hz, 2 s + 1 s + 1 s, twice)
+    --            "eas"    the TV / radio Emergency Alert System tone (same tones, 8 s)
+    --            "siren"  an outdoor warning siren
+    --            "alarm"  2 s of the EAS tone, "beep", "chime", or "none"
     --   file     a .wav file to play instead (native only)
     --   repeats  how many times to play the sound
     --   volume   0..1
@@ -245,8 +285,10 @@ return {
     --   map      false = don't draw it on the map
     --   list     false = don't show it in the alerts list
     --
-    -- Warnings come with a storm-based polygon. Watches don't, so they are
-    -- drawn as the outlines of the counties they cover (dashed).
+    -- Storm warnings come with a storm-based polygon. Watches, winter and tropical
+    -- alerts don't, so they are drawn as the outlines of the counties they cover
+    -- (dashed). Marine alerts other than Special Marine Warnings have no outline,
+    -- so they aren't listed here. Delete any line you don't want.
 
     alerts = {
         enabled    = true,  -- false turns off alerts completely (no polygons, list or sounds)
@@ -255,13 +297,46 @@ return {
         volume     = 0.8,
         on_startup = false, -- also sound alerts that were already active when the app opened
         rules = {
-            { event = "Tornado Warning", damage = "catastrophic", sound = "siren", repeats = 5, color = "#ff2dd4" },
-            { event = "Tornado Warning", tornado = "observed",    sound = "siren", repeats = 3, color = col.red },
-            { event = "Tornado Warning",                          sound = "alarm", repeats = 2, color = "#ff6b6b" },
+            { event = "Tornado Warning", damage = "catastrophic", sound = "wea",   repeats = 3, color = "#ff2dd4" },
+            { event = "Tornado Warning", tornado = "observed",    sound = "wea",   repeats = 2, color = col.red },
+            { event = "Tornado Warning",                          sound = "wea",   color = "#ff6b6b" },
+            { event = "Extreme Wind Warning",                     sound = "siren", repeats = 3, color = "#ff8c00" },
+            { event = "Severe Thunderstorm Warning", damage = "destructive", sound = "alarm", color = "#ff5e3a" },
+            { event = "Severe Thunderstorm Warning", tornado = "possible", sound = "wea", color = "#ffb347" },
             { event = "Severe Thunderstorm Warning", hail = 2.0,  sound = "beep",  color = col.orange },
             { event = "Severe Thunderstorm Warning",              sound = "chime", color = col.yellow },
-            { event = "Tornado Watch",                            sound = "beep",  color = "#ff6b6b88" },
+            { event = "Flash Flood Warning", damage = "catastrophic", sound = "alarm", repeats = 2, color = "#3dffb0" },
+            { event = "Flash Flood Warning",                      sound = "chime", color = "#2fc98a" },
+            { event = "Snow Squall Warning",                      sound = "beep",  color = "#c77dff" },
+            { event = "Dust Storm Warning",                       sound = "beep",  color = "#d2b48c" },
+            { event = "Special Marine Warning",                   sound = "none",  color = "#ffa94d" },
+
+            -- watches (dashed county outlines; the "watches" switch / A key)
+            { event = "Tornado Watch",                            sound = "wea",   color = "#ff6b6b88" },
             { event = "Severe Thunderstorm Watch",                sound = "none",  color = "#ffd60a66" },
+            { event = "Flash Flood Watch",                        sound = "none",  color = "#4fd67a66" },
+
+            -- winter
+            { event = "Blizzard Warning",                         sound = "beep",  color = "#e8f4ff" },
+            { event = "Ice Storm Warning",                        sound = "beep",  color = "#a78bfa" },
+            { event = "Winter Storm Warning",                     sound = "none",  color = "#ff69b4" },
+            { event = "Lake Effect Snow Warning",                 sound = "none",  color = "#2dd4d4" },
+            { event = "Extreme Cold Warning",                     sound = "none",  color = "#5aa9ff" },
+            { event = "Winter Storm Watch",                       sound = "none",  color = "#7aa7d988" },
+            { event = "Winter Weather Advisory",                  sound = "none",  color = "#9d8cf255", map = false },
+
+            -- tropical
+            { event = "Hurricane Warning",                        sound = "alarm", color = "#ff2d55" },
+            { event = "Storm Surge Warning",                      sound = "alarm", color = "#b524f7" },
+            { event = "Tropical Storm Warning",                   sound = "beep",  color = "#e0565b" },
+            { event = "Hurricane Watch",                          sound = "none",  color = "#ff2dd488" },
+            { event = "Tropical Storm Watch",                     sound = "none",  color = "#f0808088" },
+
+            -- other
+            { event = "High Wind Warning",                        sound = "none",  color = "#daa520" },
+            { event = "Red Flag Warning",                         sound = "none",  color = "#ff1493", map = false },
+            { event = "Extreme Heat Warning",                     sound = "none",  color = "#c71585", map = false },
+            { event = "Tsunami Warning",                          sound = "siren", color = "#fd6347" },
         },
     },
 

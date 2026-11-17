@@ -10,6 +10,16 @@ fn tone(out: &mut Vec<f32>, secs: f32, mut f: impl FnMut(f32) -> f32) {
     out.extend((0..n).map(|i| f(i as f32 / RATE as f32)));
 }
 
+/// Built-in sound names (anything else plays nothing).
+pub const SOUNDS: [&str; 6] = ["wea", "eas", "siren", "alarm", "beep", "chime"];
+
+/// The EAS / WEA attention signal: 853 Hz and 960 Hz together.
+fn attention(out: &mut Vec<f32>, secs: f32) {
+    tone(out, secs, |t| {
+        0.4 * ((TAU * 853.0 * t).sin() + (TAU * 960.0 * t).sin()) * env(t, secs)
+    });
+}
+
 /// Short fade in/out so tones don't click.
 fn env(t: f32, len: f32) -> f32 {
     (t / 0.01).min(1.0) * ((len - t) / 0.02).clamp(0.0, 1.0)
@@ -30,13 +40,25 @@ pub fn synth(kind: &str) -> Vec<f32> {
                 0.45 * s * env(t, len)
             });
         }
-        // EAS-style two-tone attention signal (853 + 960 Hz)
-        "alarm" => {
-            let len = 2.0;
-            tone(&mut v, len, |t| {
-                0.4 * ((TAU * 853.0 * t).sin() + (TAU * 960.0 * t).sin()) * env(t, len)
-            });
+        // Wireless Emergency Alert, the phone one (47 CFR 10.520): a 2 s tone, then two
+        // 1 s tones, 0.5 s apart; the whole pattern twice, 0.5 s between them
+        "wea" => {
+            for rep in 0..2 {
+                if rep > 0 {
+                    tone(&mut v, 0.5, |_| 0.0);
+                }
+                for (i, secs) in [2.0, 1.0, 1.0].into_iter().enumerate() {
+                    if i > 0 {
+                        tone(&mut v, 0.5, |_| 0.0);
+                    }
+                    attention(&mut v, secs);
+                }
+            }
         }
+        // the TV / radio Emergency Alert System attention signal: 8 s steady (47 CFR 11.31)
+        "eas" => attention(&mut v, 8.0),
+        // a short burst of the same two tones
+        "alarm" => attention(&mut v, 2.0),
         "beep" => {
             for _ in 0..3 {
                 tone(&mut v, 0.16, |t| {
@@ -217,6 +239,29 @@ impl Player {
                 self.playing.push(src);
             }
             Err(e) => log::warn!("audio: {e:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wea_follows_the_fcc_cadence() {
+        let v = synth("wea");
+        let secs = v.len() as f32 / RATE as f32;
+        // (2 + 0.5 + 1 + 0.5 + 1) × 2 + 0.5
+        assert!((secs - 10.5).abs() < 0.01, "{secs}");
+        let loud = |t: f32| {
+            let i = (t * RATE as f32) as usize;
+            v[i..i + 200].iter().any(|s| s.abs() > 0.1)
+        };
+        assert!(loud(1.0) && !loud(2.2) && loud(3.0) && !loud(3.7) && loud(4.5));
+        assert!(!loud(5.2) && loud(6.5), "second round");
+        assert!((synth("eas").len() as f32 / RATE as f32 - 8.0).abs() < 0.01);
+        for s in SOUNDS {
+            assert!(!synth(s).is_empty(), "{s}");
         }
     }
 }

@@ -215,6 +215,53 @@ pub struct MapStyle {
     pub road_colors: [Color32; 6],
     pub city_color: Color32,
     pub warnings: bool,
+    /// county outlines of tornado / severe thunderstorm watches
+    pub watches: bool,
+}
+
+/// How one outlook level is drawn. `None` = not drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LevelStyle {
+    pub line: Option<Color32>,
+    pub fill: Option<Color32>,
+}
+
+/// `outlook = { ... }`: the SPC convective outlook layer.
+#[derive(Clone)]
+pub struct OutlookCfg {
+    /// what to show on start (None = off)
+    pub show: Option<crate::spc::Sel>,
+    /// outline width in px (0 = no outlines)
+    pub width: f32,
+    /// opacity of the fill when a level has no fill colour of its own (0 = no fill)
+    pub fill: f32,
+    /// draw fills under the radar instead of over it
+    pub fill_under_radar: bool,
+    pub labels: bool,
+    pub label_size: f32,
+    /// per-level overrides keyed like "MRGL", "10%", "SIG" (upper case, no "%")
+    pub levels: Vec<(String, Option<LevelStyle>)>,
+}
+
+impl OutlookCfg {
+    fn norm(k: &str) -> String {
+        k.trim().trim_end_matches('%').to_ascii_uppercase()
+    }
+
+    /// How to draw an area with SPC label `key` and SPC colour `spc`; None hides it.
+    pub fn style(&self, key: &str, spc: Color32) -> Option<LevelStyle> {
+        let k = Self::norm(key);
+        let over = self.levels.iter().find(|(n, _)| *n == k).map(|(_, s)| *s);
+        let base = LevelStyle {
+            line: (self.width > 0.0).then_some(spc),
+            fill: (self.fill > 0.0).then(|| spc.gamma_multiply(self.fill)),
+        };
+        match over {
+            None => Some(base),
+            Some(None) => None,
+            Some(Some(s)) => Some(s),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -280,13 +327,15 @@ pub enum Action {
     Roads,
     Cities,
     Warnings,
+    Watches,
+    Outlook,
     Settings,
     Open,
     Radio,
 }
 
 impl Action {
-    pub const ALL: [(Action, &'static str, &'static str); 14] = [
+    pub const ALL: [(Action, &'static str, &'static str); 16] = [
         (Action::PrevScan, "prev_scan", "ArrowLeft"),
         (Action::NextScan, "next_scan", "ArrowRight"),
         (Action::TiltUp, "tilt_up", "ArrowUp"),
@@ -298,6 +347,8 @@ impl Action {
         (Action::Roads, "roads", "M"),
         (Action::Cities, "cities", "C"),
         (Action::Warnings, "warnings", "W"),
+        (Action::Watches, "watches", "A"),
+        (Action::Outlook, "outlook", "S"),
         (Action::Settings, "settings", "Comma"),
         (Action::Open, "open", "O"),
         (Action::Radio, "radio", "Space"),
@@ -383,6 +434,7 @@ pub struct Config {
     pub syntax: Syntax,
     pub palettes: Vec<(Moment, Palette)>,
     pub alerts: AlertCfg,
+    pub outlook: OutlookCfg,
     pub bookmarks: Vec<Bookmark>,
 }
 
@@ -506,6 +558,7 @@ impl Config {
             },
             city_color: col(sub("map", "city_color"), "map.city_color")?.unwrap_or(theme.fg),
             warnings: sub("map", "warnings").bool().unwrap_or(true),
+            watches: sub("map", "watches").bool().unwrap_or(true),
         };
         let layout = Layout {
             mode: match sub("layout", "mode").str().unwrap_or("spiral") {
@@ -578,7 +631,16 @@ impl Config {
                 tornado: x.get("tornado").str().map(str::to_lowercase),
                 damage: x.get("damage").str().map(str::to_lowercase),
                 hail: x.get("hail").num().map(|v| v as f32),
-                sound: x.get("sound").str().unwrap_or("beep").to_lowercase(),
+                sound: {
+                    let s = x.get("sound").str().unwrap_or("beep").to_lowercase();
+                    if s != "none" && !crate::sound::SOUNDS.contains(&s.as_str()) {
+                        return Err(format!(
+                            "{what}: unknown sound {s:?} ({}, or \"none\")",
+                            crate::sound::SOUNDS.join(", ")
+                        ));
+                    }
+                    s
+                },
                 file: x.get("file").str().map(String::from),
                 repeats: x.get("repeats").num().unwrap_or(1.0).clamp(0.0, 20.0) as u32,
                 volume: x.get("volume").num().unwrap_or(1.0).clamp(0.0, 1.0) as f32,
@@ -686,6 +748,85 @@ impl Config {
             })
             .collect();
 
+        let outlook = {
+            let day = sub("outlook", "day").num().unwrap_or(1.0);
+            if !(1.0..=3.0).contains(&day) || day.fract() != 0.0 {
+                return Err(format!("outlook.day: {day} (1, 2 or 3)"));
+            }
+            let day = day as u8;
+            let show = match sub("outlook", "show") {
+                L::Nil | L::Bool(false) => None,
+                L::Bool(true) => Some(crate::spc::Sel {
+                    day,
+                    kind: crate::spc::Kind::Categorical,
+                }),
+                L::Str(s) => {
+                    let kind = crate::spc::Kind::from_name(s).ok_or_else(|| {
+                        format!(
+                            "outlook.show: unknown {s:?} (categorical, tornado, wind, hail, severe)"
+                        )
+                    })?;
+                    if !crate::spc::Kind::for_day(day).contains(&kind) {
+                        return Err(format!(
+                            "outlook.show: SPC has no {s:?} outlook for day {day} (day 3 has categorical and severe)"
+                        ));
+                    }
+                    Some(crate::spc::Sel { day, kind })
+                }
+                _ => return Err("outlook.show: expected false or a name like \"tornado\"".into()),
+            };
+            let fill = sub("outlook", "fill").num().unwrap_or(0.0).clamp(0.0, 1.0) as f32;
+            let width = sub("outlook", "width")
+                .num()
+                .unwrap_or(1.6)
+                .clamp(0.0, 10.0) as f32;
+            // defaults first, then the user's table on top
+            let mut levels: Vec<(String, Option<LevelStyle>)> = Vec::new();
+            for src in [
+                d.get("outlook").get("colors"),
+                r.get("outlook").get("colors"),
+            ] {
+                let L::Table { map, .. } = src else { continue };
+                for (k, v) in map {
+                    let what = format!("outlook.colors[\"{k}\"]");
+                    let st = match v {
+                        L::Bool(false) => None,
+                        L::Str(_) => {
+                            let c = col(v, &what)?;
+                            Some(LevelStyle {
+                                line: c.filter(|_| width > 0.0),
+                                fill: c.filter(|_| fill > 0.0).map(|c| c.gamma_multiply(fill)),
+                            })
+                        }
+                        L::Table { .. } => Some(LevelStyle {
+                            line: col(v.get("line"), &format!("{what}.line"))?,
+                            fill: col(v.get("fill"), &format!("{what}.fill"))?,
+                        }),
+                        _ => {
+                            return Err(format!(
+                                "{what}: expected a colour, false, or {{ line = ..., fill = ... }}"
+                            ));
+                        }
+                    };
+                    let k = OutlookCfg::norm(k);
+                    levels.retain(|(n, _)| *n != k);
+                    levels.push((k, st));
+                }
+            }
+            OutlookCfg {
+                show,
+                width,
+                fill,
+                fill_under_radar: sub("outlook", "fill_under_radar").bool().unwrap_or(true),
+                labels: sub("outlook", "labels").bool().unwrap_or(true),
+                label_size: sub("outlook", "label_size")
+                    .num()
+                    .unwrap_or(11.0)
+                    .clamp(6.0, 30.0) as f32,
+                levels,
+            }
+        };
+
         Ok(Config {
             site: pick("site").str().unwrap_or("KTLX").to_uppercase(),
             live: pick("live").bool().unwrap_or(true),
@@ -712,6 +853,7 @@ impl Config {
             syntax,
             palettes,
             alerts,
+            outlook,
             bookmarks,
         })
     }
