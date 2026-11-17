@@ -79,6 +79,7 @@
         <li>Settings, colour tables and alert sounds live in a Lua file. It runs in <a href="https://github.com/kyren/piccolo" target="_blank" rel="noopener">piccolo</a>, a Lua VM written in pure Rust, so the same config works on the desktop and here.</li>
         <li>Every active NWS warning and watch in the country is drawn and listed, checked every minute, with a nationwide tornado warning count. Search or filter them by type. Tornado warnings near your radar play the TV emergency alert tone, and every rule can be changed in the config. Your browser only allows sound after you click the page once.</li>
         <li>SPC convective outlooks for days 1–8 can be laid over the map.</li>
+        <li>In storms the radar rescans the lowest tilt every minute and a half or so (SAILS). ◀ ▶ step through every rescan, each pane shows when its scan finished, and <code>loop</code> plays the last 15 minutes (or up to two hours). Try it on Mayfield.</li>
       </ul>
     </section>
 

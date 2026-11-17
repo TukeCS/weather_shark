@@ -138,6 +138,8 @@ pub struct App {
     /// Where a newly added pane grows out from (the pane it split).
     spawn: Option<(u64, Rect)>,
     last_rects: Vec<(u64, Rect)>,
+    /// how wide the top bar was at each squeeze level, as last drawn
+    bar_need: [Option<f32>; 3],
     /// split ratios from dragging the borders between panes (NaN = the default)
     split_ratios: Vec<f32>,
     /// (pane count, layout) the ratios were dragged in
@@ -317,6 +319,7 @@ impl App {
             spawn: None,
             last_rects: Vec::new(),
             split_ratios: Vec::new(),
+            bar_need: [None; 3],
             split_shape: None,
             resizing: false,
             hovered_pane: None,
@@ -1732,13 +1735,26 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| {
-                // scrolls sideways instead of overlapping when the window is narrow
-                egui::ScrollArea::horizontal()
+                // The widest layout that fit when last measured: each level is
+                // measured as it's drawn, and a narrower one is tried next frame
+                // when it doesn't fit. It still scrolls sideways if even the
+                // narrowest is too wide.
+                let room = ui.available_width();
+                let mut level = 0u8;
+                while level < 2 && self.bar_need[level as usize].is_some_and(|w| w > room) {
+                    level += 1;
+                }
+                let out = egui::ScrollArea::horizontal()
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .show(ui, |ui| {
                         ui.set_height(40.0);
-                        self.top_bar(ui, now)
+                        self.top_bar(ui, now, level)
                     });
+                let need = out.content_size.x;
+                self.bar_need[level as usize] = Some(need);
+                if need > room && level < 2 {
+                    ui.ctx().request_repaint();
+                }
                 // download progress: a thin line along the bottom edge of the bar
                 if self.loading.is_some() {
                     let full = ui.max_rect().expand2(vec2(12.0, 0.0));

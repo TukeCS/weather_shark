@@ -74,6 +74,10 @@ struct VolumeDownload {
     stuck: u32,
     /// how long one attempt gets
     attempt: std::time::Duration,
+    /// the attempt in flight; callbacks from abandoned ones are ignored
+    attempt_id: u32,
+    /// when bytes last arrived (or the attempt started)
+    last_progress: web_time::Instant,
 }
 
 #[derive(Clone)]
@@ -273,16 +277,71 @@ impl Net {
             skip: 0,
             stuck: 0,
             attempt,
+            attempt_id: 0,
+            last_progress: web_time::Instant::now(),
         }));
         Self::volume_from(self.clone(), key.to_string(), url, st);
     }
 
-    fn volume_from(me: Net, key: String, url: String, st: Arc<std::sync::Mutex<VolumeDownload>>) {
+    /// An attempt ended without the whole file (cut off, dropped, or hung): try
+    /// again from where it stopped, or give up after a few attempts that got nothing.
+    fn retry_or_fail(
+        me: Net,
+        key: String,
+        url: String,
+        st: Arc<std::sync::Mutex<VolumeDownload>>,
+        from: usize,
+        e: String,
+    ) {
         const TRIES: u32 = 3;
-        let (from, attempt) = {
-            let g = st.lock().unwrap();
-            (g.got, g.attempt)
+        let mut g = st.lock().unwrap();
+        let progress = g.got > from;
+        g.stuck = if progress { 0 } else { g.stuck + 1 };
+        if g.dec.is_some() && g.stuck < TRIES {
+            log::info!("{key}: resuming at {} bytes ({e})", g.got);
+            drop(g);
+            Self::volume_from(me, key, url, st);
+        } else {
+            g.dec = None;
+            g.attempt_id += 1; // nothing more from any attempt
+            drop(g);
+            me.send(Msg::Volume {
+                key,
+                vol: Err(e),
+                done: true,
+            });
+        }
+    }
+
+    fn volume_from(me: Net, key: String, url: String, st: Arc<std::sync::Mutex<VolumeDownload>>) {
+        let (from, attempt, id) = {
+            let mut g = st.lock().unwrap();
+            g.attempt_id += 1;
+            g.last_progress = web_time::Instant::now();
+            (g.got, g.attempt, g.attempt_id)
         };
+        // The library's timeout only covers the body arriving; a request that hangs
+        // before that (connecting, waiting for the reply) would wait forever. So a
+        // watchdog gives up on an attempt that gets nothing for a while.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (me, key, url, st) = (me.clone(), key.clone(), url.clone(), st.clone());
+            std::thread::spawn(move || {
+                let patience = attempt + std::time::Duration::from_secs(10);
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let g = st.lock().unwrap();
+                    if g.attempt_id != id || g.dec.is_none() {
+                        return; // finished, failed, or already retried
+                    }
+                    if g.last_progress.elapsed() > patience {
+                        drop(g);
+                        Self::retry_or_fail(me, key, url, st, from, "no data, gave up waiting".into());
+                        return;
+                    }
+                }
+            });
+        }
         let mut req = ehttp::Request::get(&url).with_timeout(Some(attempt));
         if from > 0 {
             req.headers.insert("Range", format!("bytes={from}-"));
@@ -292,6 +351,9 @@ impl Net {
             use ehttp::streaming::Part;
             use std::ops::ControlFlow;
             let mut g = st.lock().unwrap();
+            if g.attempt_id != id {
+                return ControlFlow::Break(()); // abandoned by the watchdog
+            }
             let fail = |e: String| {
                 me.send(Msg::Volume {
                     key: key.clone(),
@@ -303,19 +365,13 @@ impl Net {
             match part {
                 // cut off (timeout, dropped connection): carry on from here
                 Err(e) => {
-                    let progress = g.got > from;
-                    g.stuck = if progress { 0 } else { g.stuck + 1 };
-                    if g.dec.is_some() && g.stuck < TRIES {
-                        log::info!("{key}: resuming at {} bytes ({e})", g.got);
-                        drop(g);
-                        Self::volume_from(me2.clone(), key2.clone(), url2.clone(), st2.clone());
-                        ControlFlow::Break(())
-                    } else {
-                        fail(e)
-                    }
+                    drop(g);
+                    Self::retry_or_fail(me2.clone(), key2.clone(), url2.clone(), st2.clone(), from, e);
+                    ControlFlow::Break(())
                 }
                 Ok(Part::Response(r)) => {
                     if !r.ok {
+                        g.dec = None; // final: the watchdog leaves it alone
                         return fail(format!("download failed: HTTP {}", r.status));
                     }
                     let len: Option<usize> =
@@ -346,11 +402,13 @@ impl Net {
                     g.skip -= skip;
                     let c = &c[skip..];
                     g.got += c.len();
+                    g.last_progress = web_time::Instant::now();
                     let sent = g.sent_sweeps;
                     let Some(dec) = g.dec.as_mut() else {
                         return ControlFlow::Break(());
                     };
                     if let Err(e) = dec.push(c) {
+                        g.dec = None;
                         return fail(e);
                     }
                     // Hand over each newly finished sweep among the first few (the low tilts).

@@ -39,8 +39,26 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Alerts to count on the button (listed and not hidden), and the colour of
+    /// the most important one.
+    fn alert_badge(&self) -> (usize, Color32) {
+        let listed: Vec<usize> = self
+            .listed_alerts()
+            .filter(|(_, a)| !self.hidden.contains(&a.id))
+            .map(|(i, _)| i)
+            .collect();
+        let col = listed
+            .first()
+            .map(|&i| self.cfg.alerts.rules[self.alerts[i].1].color.to_opaque())
+            .unwrap_or(self.cfg.theme.fg);
+        (listed.len(), col)
+    }
+
     /// The top bar shows exactly the items listed in `ui.toolbar`, in that order.
-    pub(super) fn top_bar(&mut self, ui: &mut Ui, now: f64) {
+    /// `level` squeezes it into narrow windows: 1 folds the panel buttons (pane,
+    /// map, events, alerts, radio, lua) into a "more" menu, 2 also drops the app name,
+    /// the scan's age and the loop-length picker (that one moves into "more" too).
+    pub(super) fn top_bar(&mut self, ui: &mut Ui, now: f64, level: u8) {
         let t = self.cfg.theme.clone();
         ui.horizontal_centered(|ui| {
             // logo dot: pulses red while a new alert is fresh
@@ -52,11 +70,16 @@ impl App {
                 t.accent
             };
             ui.painter().circle_filled(r.center(), 4.0, c);
-            ui.label(RichText::new("weather_shark").strong());
+            if level < 2 {
+                ui.label(RichText::new("weather_shark").strong());
+            }
 
             let items = self.cfg.ui.toolbar.clone();
+            let folded = |item: &str| {
+                level >= 1 && matches!(item, "panes" | "map" | "events" | "alerts" | "radio" | "lua")
+            };
             let mut last_group = "";
-            for item in &items {
+            for item in items.iter().filter(|i| !folded(i)) {
                 // a thin divider between the radar controls and the panels
                 let group = if matches!(item.as_str(), "site" | "time" | "tilt" | "panes") {
                     "radar"
@@ -69,7 +92,7 @@ impl App {
                 }
                 match item.as_str() {
                     "site" => self.site_picker(ui),
-                    "time" => self.time_controls(ui),
+                    "time" => self.time_controls(ui, level >= 2),
                     "tilt" => {
                         let tilts = self.tilts();
                         egui::ComboBox::from_id_salt("tilt")
@@ -97,35 +120,15 @@ impl App {
                     "map" => self.map_menu(ui),
                     "events" => self.events_menu(ui),
                     "alerts" if self.cfg.alerts.enabled => {
-                        let listed: Vec<usize> = self
-                            .listed_alerts()
-                            .filter(|(_, a)| !self.hidden.contains(&a.id))
-                            .map(|(i, _)| i)
-                            .collect();
-                        let n = listed.len();
-                        let warn = listed
-                            .first()
-                            .map(|&i| self.cfg.alerts.rules[self.alerts[i].1].color.to_opaque())
-                            .unwrap_or(t.muted);
-                        let txt = RichText::new(format!("alerts {n}")).color(if n > 0 {
-                            warn
-                        } else {
-                            t.fg
-                        });
+                        let (n, col) = self.alert_badge();
+                        let txt = RichText::new(format!("alerts {n}")).color(col);
                         self.side_toggle(
                             ui,
                             Side::Alerts,
                             txt,
                             "active warnings and watches",
                         );
-                        let tor = self.tornado_total();
-                        if tor > 0 {
-                            ui.label(RichText::new(format!("TOR {tor}")).color(LIVE_RED).strong())
-                                .on_hover_text(format!(
-                                    "{tor} tornado warning{} in effect across the US",
-                                    if tor == 1 { "" } else { "s" }
-                                ));
-                        }
+                        self.tornado_label(ui);
                     }
                     "radio" if self.cfg.radio.enabled => {
                         let txt = match &self.playing {
@@ -142,7 +145,104 @@ impl App {
                     _ => {}
                 }
             }
+            if level >= 1 {
+                ui.separator();
+                self.more_menu(ui, &items, level);
+                if items.iter().any(|i| i == "alerts") && self.cfg.alerts.enabled {
+                    self.tornado_label(ui);
+                }
+            }
         });
+    }
+
+    /// "TOR n" in red while any tornado warning is in effect in the country.
+    fn tornado_label(&self, ui: &mut Ui) {
+        let tor = self.tornado_total();
+        if tor > 0 {
+            ui.label(RichText::new(format!("TOR {tor}")).color(LIVE_RED).strong())
+                .on_hover_text(format!(
+                    "{tor} tornado warning{} in effect across the US",
+                    if tor == 1 { "" } else { "s" }
+                ));
+        }
+    }
+
+    /// The "more" menu for narrow windows: the folded toolbar buttons, as menu items.
+    fn more_menu(&mut self, ui: &mut Ui, items: &[String], level: u8) {
+        let t = self.cfg.theme.clone();
+        let (n, col) = self.alert_badge();
+        let has = |x: &str| items.iter().any(|i| i == x);
+        let alerts = has("alerts") && self.cfg.alerts.enabled;
+        let mut label = egui::text::LayoutJob::default();
+        label.append("more ▾", 0.0, egui::TextFormat::simple(FontId::monospace(14.0), t.fg));
+        if alerts && n > 0 {
+            label.append(&format!(" {n}"), 0.0, egui::TextFormat::simple(FontId::monospace(13.0), col));
+        }
+        let btn = ui.button(label).on_hover_text("more");
+        egui::Popup::menu(&btn)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(180.0);
+                if has("panes")
+                    && ui
+                        .add_enabled(self.panes.len() < MAX_PANES, egui::Button::new("+ pane"))
+                        .clicked()
+                {
+                    self.add_pane();
+                    ui.close();
+                }
+                if has("map") {
+                    ui.menu_button("map", |ui| self.map_menu_body(ui));
+                }
+                if has("events") {
+                    ui.menu_button("events", |ui| self.events_menu_body(ui));
+                }
+                let mut toggle = |ui: &mut Ui, side: Side, text: RichText| {
+                    if ui.selectable_label(self.side == side, text).clicked() {
+                        self.side = if self.side == side { Side::None } else { side };
+                        ui.close();
+                    }
+                };
+                if alerts {
+                    toggle(ui, Side::Alerts, RichText::new(format!("alerts {n}")).color(col));
+                }
+                if has("radio") && self.cfg.radio.enabled {
+                    let txt = match &self.playing {
+                        Some(call) => RichText::new(format!("radio ● {call}")).color(LIVE_RED),
+                        None => RichText::new("radio"),
+                    };
+                    toggle(ui, Side::Radio, txt);
+                }
+                if has("lua") {
+                    toggle(ui, Side::Settings, RichText::new("lua"));
+                }
+                if level >= 2 && has("time") {
+                    ui.separator();
+                    ui.menu_button(format!("loop length: {} min", self.loop_minutes), |ui| {
+                        self.loop_length_items(ui);
+                    });
+                }
+            });
+    }
+
+    /// The loop-length choices; picking one while the loop plays restarts it.
+    fn loop_length_items(&mut self, ui: &mut Ui) {
+        let mut mins = self.loop_minutes;
+        for m in [10, 15, 30, 60, 120] {
+            ui.selectable_value(&mut mins, m, format!("{m} min"));
+        }
+        self.set_loop_minutes(ui, mins);
+    }
+
+    fn set_loop_minutes(&mut self, ui: &Ui, mins: u32) {
+        if mins != self.loop_minutes {
+            self.loop_minutes = mins;
+            if self.anim.is_some() {
+                let now = ui.input(|i| i.time);
+                self.anim = None;
+                self.toggle_loop(now);
+            }
+        }
     }
 
     fn site_picker(&mut self, ui: &mut Ui) {
@@ -180,7 +280,7 @@ impl App {
     }
 
     /// Scan time, loading progress, ◀ ▶ and the live switch.
-    fn time_controls(&mut self, ui: &mut Ui) {
+    fn time_controls(&mut self, ui: &mut Ui, compact: bool) {
         let t = self.cfg.theme.clone();
         match &self.scan {
             Some(s) => {
@@ -203,8 +303,10 @@ impl App {
                     "archive".into()
                 };
                 let hover = s.key.strip_prefix("file:").unwrap_or(&s.key).to_string();
-                ui.label(RichText::new(tag).color(t.muted))
-                    .on_hover_text(hover);
+                if !compact {
+                    ui.label(RichText::new(tag).color(t.muted))
+                        .on_hover_text(hover);
+                }
                 if !self.live
                     && let Some((frames, i)) = self.frame_pos()
                     && frames.len() > 1
@@ -256,25 +358,20 @@ impl App {
             let now = ui.input(|i| i.time);
             self.toggle_loop(now);
         }
-        // how far back the loop goes; changing it while playing restarts the loop
-        let mut mins = self.loop_minutes;
-        egui::ComboBox::from_id_salt("loop_minutes")
-            .selected_text(format!("{mins} min"))
-            .width(64.0)
-            .show_ui(ui, |ui| {
-                for m in [10, 15, 30, 60, 120] {
-                    ui.selectable_value(&mut mins, m, format!("{m} min"));
-                }
-            })
-            .response
-            .on_hover_text("how far back the loop goes");
-        if mins != self.loop_minutes {
-            self.loop_minutes = mins;
-            if playing {
-                let now = ui.input(|i| i.time);
-                self.anim = None;
-                self.toggle_loop(now);
-            }
+        // how far back the loop goes (in the "more" menu when the bar is squeezed)
+        if !compact {
+            let mut mins = self.loop_minutes;
+            egui::ComboBox::from_id_salt("loop_minutes")
+                .selected_text(format!("{mins} min"))
+                .width(64.0)
+                .show_ui(ui, |ui| {
+                    for m in [10, 15, 30, 60, 120] {
+                        ui.selectable_value(&mut mins, m, format!("{m} min"));
+                    }
+                })
+                .response
+                .on_hover_text("how far back the loop goes");
+            self.set_loop_minutes(ui, mins);
         }
         let live = RichText::new("● live").color(if self.live { LIVE_RED } else { t.muted });
         if ui
@@ -297,40 +394,43 @@ impl App {
         let btn = ui.button("map");
         egui::Popup::menu(&btn)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                ui.set_min_width(200.0);
-                let muted = self.cfg.theme.muted;
-                heading(ui, "LAYERS", muted);
-                ui.checkbox(&mut self.show.roads, "roads  (m)");
-                ui.add_enabled(
-                    self.show.roads,
-                    egui::Checkbox::new(&mut self.show.road_labels, "highway numbers"),
-                );
-                ui.checkbox(&mut self.show.cities, "cities & towns  (c)");
-                ui.checkbox(&mut self.show.counties, "counties");
-                ui.checkbox(&mut self.show.rings, "range rings");
-                ui.checkbox(&mut self.show.sites, "radar sites");
-                let (wk, ak) = (
-                    self.key_hint(Action::Warnings),
-                    self.key_hint(Action::Watches),
-                );
-                ui.checkbox(&mut self.show.warnings, format!("warnings{wk}"));
-                ui.checkbox(&mut self.show.watches, format!("watches{ak}"))
-                    .on_hover_text(
-                        "tornado / severe thunderstorm watches, as dashed county outlines",
-                    );
-                self.alert_types_menu(ui);
-                self.outlook_menu(ui);
-                if let Some(e) = &self.tiles.error {
-                    ui.colored_label(ERR, e);
-                } else if self.tiles.failed_count() > 0 {
-                    ui.label(
-                        RichText::new(format!("{} map tiles failed", self.tiles.failed_count()))
-                            .color(muted)
-                            .small(),
-                    );
-                }
-            });
+            .show(|ui| self.map_menu_body(ui));
+    }
+
+    /// Layers, alert types and the SPC outlook (in the "map" button or the "more" menu).
+    fn map_menu_body(&mut self, ui: &mut Ui) {
+        ui.set_min_width(200.0);
+        let muted = self.cfg.theme.muted;
+        heading(ui, "LAYERS", muted);
+        ui.checkbox(&mut self.show.roads, "roads  (m)");
+        ui.add_enabled(
+            self.show.roads,
+            egui::Checkbox::new(&mut self.show.road_labels, "highway numbers"),
+        );
+        ui.checkbox(&mut self.show.cities, "cities & towns  (c)");
+        ui.checkbox(&mut self.show.counties, "counties");
+        ui.checkbox(&mut self.show.rings, "range rings");
+        ui.checkbox(&mut self.show.sites, "radar sites");
+        let (wk, ak) = (
+            self.key_hint(Action::Warnings),
+            self.key_hint(Action::Watches),
+        );
+        ui.checkbox(&mut self.show.warnings, format!("warnings{wk}"));
+        ui.checkbox(&mut self.show.watches, format!("watches{ak}"))
+            .on_hover_text(
+                "tornado / severe thunderstorm watches, as dashed county outlines",
+            );
+        self.alert_types_menu(ui);
+        self.outlook_menu(ui);
+        if let Some(e) = &self.tiles.error {
+            ui.colored_label(ERR, e);
+        } else if self.tiles.failed_count() > 0 {
+            ui.label(
+                RichText::new(format!("{} map tiles failed", self.tiles.failed_count()))
+                    .color(muted)
+                    .small(),
+            );
+        }
     }
 
     /// One checkbox per alert event that has a rule: switch a kind of alert off
@@ -453,55 +553,58 @@ impl App {
     }
 
     fn events_menu(&mut self, ui: &mut Ui) {
-        let t = self.cfg.theme.clone();
         let bm = ui.button("events");
-        egui::Popup::menu(&bm).show(|ui| {
-            ui.set_min_width(280.0);
+        egui::Popup::menu(&bm).show(|ui| self.events_menu_body(ui));
+    }
+
+    /// Open a file, bookmarks and go-to-time (in the "events" button or the "more" menu).
+    fn events_menu_body(&mut self, ui: &mut Ui) {
+        let t = self.cfg.theme.clone();
+        ui.set_min_width(280.0);
+        if ui
+            .button(format!("open file…{}", self.key_hint(Action::Open)))
+            .on_hover_text("a NEXRAD Level II file (or drop one on the window)")
+            .clicked()
+        {
+            if let Err(e) = self.net.pick_file() {
+                self.error = Some(e);
+            }
+            ui.close();
+        }
+        if self.cfg.bookmarks.is_empty() {
+            ui.separator();
+        } else {
+            heading(ui, "BOOKMARKS", t.muted);
+        }
+        let mut go = None;
+        for b in &self.cfg.bookmarks {
             if ui
-                .button(format!("open file…{}", self.key_hint(Action::Open)))
-                .on_hover_text("a NEXRAD Level II file (or drop one on the window)")
+                .button(format!("{:<14} {} {}", b.name, b.site, b.time))
                 .clicked()
             {
-                if let Err(e) = self.net.pick_file() {
-                    self.error = Some(e);
-                }
-                ui.close();
+                go = Some((b.site.clone(), b.time.clone()));
             }
-            if self.cfg.bookmarks.is_empty() {
-                ui.separator();
-            } else {
-                heading(ui, "BOOKMARKS", t.muted);
+        }
+        ui.separator();
+        ui.label(
+            RichText::new("go to  SITE YYYY-MM-DD HH:MM (UTC)")
+                .color(t.muted)
+                .small(),
+        );
+        let r = ui
+            .add(egui::TextEdit::singleline(&mut self.jump).hint_text("KTLX 2013-05-20 20:08"));
+        if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            let s = self.jump.trim().to_string();
+            let (site, time) = s.split_once(' ').unwrap_or((&s, ""));
+            go = Some((site.to_uppercase(), time.to_string()));
+        }
+        if let Some((site, time)) = go {
+            match net::parse_time(&time) {
+                Some(t) => self.select_site(&site, Some(t + 60)),
+                None => self.error = Some(format!("can't read time {time:?}")),
             }
-            let mut go = None;
-            for b in &self.cfg.bookmarks {
-                if ui
-                    .button(format!("{:<14} {} {}", b.name, b.site, b.time))
-                    .clicked()
-                {
-                    go = Some((b.site.clone(), b.time.clone()));
-                }
-            }
-            ui.separator();
-            ui.label(
-                RichText::new("go to  SITE YYYY-MM-DD HH:MM (UTC)")
-                    .color(t.muted)
-                    .small(),
-            );
-            let r = ui
-                .add(egui::TextEdit::singleline(&mut self.jump).hint_text("KTLX 2013-05-20 20:08"));
-            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                let s = self.jump.trim().to_string();
-                let (site, time) = s.split_once(' ').unwrap_or((&s, ""));
-                go = Some((site.to_uppercase(), time.to_string()));
-            }
-            if let Some((site, time)) = go {
-                match net::parse_time(&time) {
-                    Some(t) => self.select_site(&site, Some(t + 60)),
-                    None => self.error = Some(format!("can't read time {time:?}")),
-                }
-                ui.close();
-            }
-        });
+            ui.close();
+        }
     }
 
     pub(super) fn settings_panel(&mut self, ui: &mut Ui) {
