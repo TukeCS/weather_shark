@@ -421,6 +421,8 @@ pub struct Config {
     pub refresh_seconds: f64,
     /// follow the radar in real time through the chunks bucket
     pub realtime: bool,
+    /// draw the rotating sweep line on live data
+    pub sweep_line: bool,
     pub tilt: f32,
     pub vel_units: VelUnits,
     pub panes: Vec<Moment>,
@@ -840,6 +842,7 @@ impl Config {
             live: pick("live").bool().unwrap_or(true),
             refresh_seconds: pick("refresh_seconds").num().unwrap_or(60.0).max(15.0),
             realtime: pick("realtime").bool().unwrap_or(true),
+            sweep_line: pick("sweep_line").bool().unwrap_or(true),
             tilt: pick("tilt").num().unwrap_or(0.5) as f32,
             vel_units: match pick("velocity_units").str().unwrap_or("kt") {
                 "mph" => VelUnits::Mph,

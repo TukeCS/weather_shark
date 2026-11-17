@@ -162,6 +162,7 @@ pub struct App {
     feed_polls: u32,
     /// new chunks decoded this frame: rebuild the picture once, after the messages
     feed_dirty: bool,
+    line: Option<LineAnim>,
 
     alerts: Vec<(Alert, usize)>,
     seen: HashSet<String>,
@@ -313,6 +314,7 @@ impl App {
             last_feed_poll: f64::NEG_INFINITY,
             feed_polls: 0,
             feed_dirty: false,
+            line: None,
             alerts: Vec::new(),
             seen: HashSet::new(),
             alerts_once: false,
@@ -648,6 +650,47 @@ impl App {
             .is_some_and(|s| s.key.starts_with("live:") && s.vol.time >= t)
     }
 
+    /// The sweep line now: (azimuth, number of the sweep being scanned), while live
+    /// data is on screen and still coming in.
+    fn sweep_line(&self, now: f64) -> Option<(f32, u8)> {
+        if !self.cfg.sweep_line || !self.live {
+            return None;
+        }
+        self.scan.as_ref().filter(|s| s.key.starts_with("live:"))?;
+        let l = self.line.as_ref()?;
+        // nothing new for a while (between volumes, or the feed stalled)
+        (now - l.arrived < 20.0).then(|| (l.at(now), l.number))
+    }
+
+    /// New data arrived: glide the line from where it is to the new data edge,
+    /// timed to get there about when the next chunk is due. It never guesses
+    /// ahead of the data, so it never has to jump back.
+    fn move_line(&mut self, now: f64, a: crate::level2::Antenna) {
+        match &mut self.line {
+            Some(l) if l.number == a.number && now - l.arrived < 30.0 => {
+                let shown = l.at(now);
+                // clockwise distance to the new edge; the line never goes backwards
+                let ahead = (a.azimuth - shown).rem_euclid(360.0);
+                let ahead = if ahead > 300.0 { 0.0 } else { ahead };
+                l.interval = (0.6 * l.interval + 0.4 * (now - l.arrived)).clamp(0.5, 12.0);
+                l.arrived = now;
+                l.from = shown;
+                l.to = shown + ahead;
+                l.start = now;
+            }
+            _ => {
+                self.line = Some(LineAnim {
+                    number: a.number,
+                    from: a.azimuth,
+                    to: a.azimuth,
+                    start: now,
+                    arrived: now,
+                    interval: 4.0,
+                })
+            }
+        }
+    }
+
     // ---- real-time chunks ---------------------------------------------------------
 
     /// The newest complete archive scan of this radar, to fill in what the live
@@ -742,7 +785,7 @@ impl App {
     }
 
     /// Put the live volume on screen. Only the images of sweeps that changed are redrawn.
-    fn show_feed(&mut self) {
+    fn show_feed(&mut self, now: f64) {
         let Some(f) = self.feed.as_mut() else { return };
         let dirty = std::mem::take(&mut f.dirty);
         let Some(vol) = f.composite() else { return };
@@ -755,8 +798,12 @@ impl App {
             return;
         }
         let key = f.key();
+        let antenna = vol.antenna;
         self.show_scan(key, Arc::new(vol));
         self.textures.retain(|(_, n, _), _| !dirty.contains(n));
+        if let Some(a) = antenna {
+            self.move_line(now, a);
+        }
     }
 
     fn step(&mut self, dir: i32) {
@@ -1143,7 +1190,7 @@ impl App {
             }
         }
         if std::mem::take(&mut self.feed_dirty) {
-            self.show_feed();
+            self.show_feed(now);
         }
     }
 
@@ -1450,8 +1497,9 @@ impl eframe::App for App {
         let repaint = if now < self.alarm_until { 0 } else { 5 };
         ctx.request_repaint_after(std::time::Duration::from_secs(repaint));
         if self.feed.is_some() && self.live {
-            // keep polling for new chunks
-            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            // keep polling for chunks; ~30 fps while the sweep line turns
+            let ms = if self.sweep_line(now).is_some() { 33 } else { 1000 };
+            ctx.request_repaint_after(std::time::Duration::from_millis(ms));
         }
 
         // fit `view_km` around the radar until the user moves the map (the window
@@ -1588,6 +1636,26 @@ impl eframe::App for App {
 
 fn is_real_tornado(a: &Alert) -> bool {
     a.event.eq_ignore_ascii_case("Tornado Warning") && !a.id.starts_with("simulated-")
+}
+
+/// The sweep line's motion: from `from` to `to` (degrees, `to` >= `from`) over the
+/// expected time between chunks, starting at `start`.
+struct LineAnim {
+    number: u8,
+    from: f32,
+    to: f32,
+    start: f64,
+    /// when data last arrived (UI clock)
+    arrived: f64,
+    /// typical time between updates
+    interval: f64,
+}
+
+impl LineAnim {
+    fn at(&self, now: f64) -> f32 {
+        let k = ((now - self.start) / self.interval).clamp(0.0, 1.0) as f32;
+        (self.from + (self.to - self.from) * k).rem_euclid(360.0)
+    }
 }
 
 /// Small helper for muted section labels like "ACTIVE WARNINGS".

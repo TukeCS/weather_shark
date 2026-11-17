@@ -34,6 +34,7 @@ return {
     refresh_seconds = 60,       -- how often to look for a new scan / new alerts
     realtime        = true,     -- live: stream each scan as the radar sends it (seconds behind)
                                 -- instead of waiting for the finished file (5-10 min behind)
+    sweep_line      = true,     -- live: a rotating line over the tilt being scanned right now
     tilt            = 0.5,      -- elevation angle in degrees
     view_km         = 160,      -- how far around the radar to show on start (R resets to this)
     velocity_units  = "kt",     -- "kt", "mph" or "ms" (the VEL palette below uses these units)

@@ -25,7 +25,8 @@ i got tired of paying subscriptions
 - Real data from NOAA's public NEXRAD archive on AWS (live, or any past scan back to the 2000s)
 - Real time: live mode streams each scan from Unidata's real-time feed as the radar sends it, so
   you're seconds behind instead of the 5–10 minutes it takes for a finished scan to be archived.
-  Each tilt updates as soon as the radar has scanned it, drawn over the previous scan
+  Each tilt updates as soon as the radar has scanned it, drawn over the previous scan, with a
+  rotating line on the tilt being scanned right now
 - Products: reflectivity, velocity, correlation coefficient, ZDR, spectrum width, PHI
 - Starts with one pane; each pane you add splits the last one in a fibonacci spiral (like dwm/trwm),
   up to 6; drag the gap between two panes to resize them (double-click it to reset). Every pane shares pan/zoom and a crosshair that reads out the value under it

@@ -172,10 +172,13 @@ pub struct Volume {
     pub antenna: Option<Antenna>,
 }
 
-/// The tilt the antenna was scanning at the newest radial, and when.
+/// Where the antenna was at the newest radial, and when.
 #[derive(Clone, Copy, Debug)]
 pub struct Antenna {
+    /// elevation number of the sweep being scanned (matches `Sweep::number`)
+    pub number: u8,
     pub elevation: f32,
+    pub azimuth: f32,
     /// seconds since the Unix epoch
     pub time: f64,
 }
@@ -400,7 +403,9 @@ impl Decoder {
                         self.close_sweep();
                     }
                     self.vol.antenna = Some(Antenna {
+                        number,
                         elevation: radial.elevation,
+                        azimuth: radial.azimuth,
                         time: radial.time,
                     });
                     self.cur

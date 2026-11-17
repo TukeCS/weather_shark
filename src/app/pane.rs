@@ -36,6 +36,30 @@ impl App {
         Some((tex, range))
     }
 
+    /// The rotating antenna line, with a fading wedge behind it over the fresh data.
+    fn draw_sweep_line(&self, painter: &egui::Painter, rect: Rect, az: f32, range: f32) {
+        let col = self.cfg.theme.accent;
+        let o = self.to_screen(rect, Pos2::ZERO);
+        let at = |deg: f32| {
+            let a = deg.to_radians();
+            self.to_screen(rect, pos2(range * a.sin(), range * a.cos()))
+        };
+        let (steps, trail, peak) = (32, 45.0, 0.16);
+        let mut mesh = egui::Mesh::default();
+        for i in 0..steps {
+            let f0 = i as f32 / steps as f32;
+            let f1 = (i + 1) as f32 / steps as f32;
+            let (c0, c1) = (col.gamma_multiply(peak * f0), col.gamma_multiply(peak * f1));
+            let base = mesh.vertices.len() as u32;
+            mesh.colored_vertex(o, col.gamma_multiply(peak * (f0 + f1) / 2.0));
+            mesh.colored_vertex(at(az - trail * (1.0 - f0)), c0);
+            mesh.colored_vertex(at(az - trail * (1.0 - f1)), c1);
+            mesh.add_triangle(base, base + 1, base + 2);
+        }
+        painter.add(mesh);
+        painter.line_segment([o, at(az)], Stroke::new(2.0, col));
+    }
+
     pub(super) fn pane(&mut self, ui: &mut Ui, rect: Rect, idx: usize) {
         if rect.width() < 40.0 || rect.height() < 40.0 {
             return; // mid-animation sliver
@@ -96,7 +120,9 @@ impl App {
         }
 
         // radar image
+        let mut radar_range = None;
         if let Some((tex, range)) = self.texture(ui.ctx(), m) {
+            radar_range = Some(range);
             let a = self.to_screen(rect, pos2(-range, range));
             let b = self.to_screen(rect, pos2(range, -range));
             painter.image(
@@ -105,6 +131,19 @@ impl App {
                 Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
+        }
+
+        // the sweep line, only where the picture is changing: the sweep this pane
+        // shows is the one being scanned
+        let now = ui.input(|i| i.time);
+        if let Some((az, number)) = self.sweep_line(now)
+            && self
+                .scan
+                .as_ref()
+                .and_then(|s| s.vol.sweep_for(m, self.tilt))
+                .is_some_and(|s| s.number == number)
+        {
+            self.draw_sweep_line(&painter, rect, az, radar_range.unwrap_or(230.0));
         }
 
         // over the radar: main roads, state lines, rings, warnings
