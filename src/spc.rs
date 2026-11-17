@@ -377,6 +377,24 @@ mod style_tests {
         );
 
         assert!(Config::from_lua(r#"return { outlook = { show = "tornado", day = 3 } }"#).is_err());
+
+        // tornado rules without a sound get the EAS tone; everything else a beep
+        let cfg = Config::from_lua(
+            r#"return { alerts = { rules = {
+                { event = "Tornado Watch" },
+                { event = "Severe Thunderstorm Warning", tornado = "possible" },
+                { event = "Winter Storm Warning" },
+            } } }"#,
+        )
+        .unwrap();
+        let s: Vec<&str> = cfg.alerts.rules.iter().map(|r| r.sound.as_str()).collect();
+        assert_eq!(s, ["eas", "eas", "beep"]);
+        // and every tornado rule in the default config uses it
+        for r in &Config::default_config().alerts.rules {
+            if r.event.contains("Tornado") || r.tornado.is_some() {
+                assert_eq!(r.sound, "eas", "{}", r.event);
+            }
+        }
         assert!(Config::from_lua(r#"return { outlook = { colors = { MDT = 5 } } }"#).is_err());
     }
 }

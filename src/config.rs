@@ -632,7 +632,13 @@ impl Config {
                 damage: x.get("damage").str().map(str::to_lowercase),
                 hail: x.get("hail").num().map(|v| v as f32),
                 sound: {
-                    let s = x.get("sound").str().unwrap_or("beep").to_lowercase();
+                    // anything to do with tornadoes gets the loudest sound unless told otherwise
+                    let tornado = x.get("tornado").str().is_some()
+                        || x.get("event")
+                            .str()
+                            .is_some_and(|e| e.to_ascii_lowercase().contains("tornado"));
+                    let fallback = if tornado { "eas" } else { "beep" };
+                    let s = x.get("sound").str().unwrap_or(fallback).to_lowercase();
                     if s != "none" && !crate::sound::SOUNDS.contains(&s.as_str()) {
                         return Err(format!(
                             "{what}: unknown sound {s:?} ({}, or \"none\")",

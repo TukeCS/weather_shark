@@ -278,6 +278,7 @@ return {
     --            "wea"    the phone emergency alert (same tones, 2 s + 1 s + 1 s, twice)
     --            "siren"  an outdoor warning siren
     --            "alarm"  2 s of the EAS tone, "beep", "chime", or "none"
+    --            Left out: "eas" for anything with a tornado, "beep" otherwise.
     --   file     a .wav file to play instead (native only)
     --   repeats  how many times to play the sound
     --   volume   0..1
