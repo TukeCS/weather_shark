@@ -153,6 +153,13 @@ pub struct Sweep {
 }
 
 impl Sweep {
+    /// Where and when the antenna started this sweep, and how long it took (s).
+    pub fn scan_path(&self) -> Option<(f32, f64)> {
+        let first = self.radials.iter().min_by(|a, b| a.time.total_cmp(&b.time))?;
+        let last = self.radials.iter().map(|r| r.time).fold(f64::MIN, f64::max);
+        Some((first.azimuth, last - first.time))
+    }
+
     pub fn has(&self, m: Moment) -> bool {
         self.radials.iter().take(20).any(|r| r.get(m).is_some())
     }
@@ -172,13 +179,10 @@ pub struct Volume {
     pub antenna: Option<Antenna>,
 }
 
-/// Where the antenna was at the newest radial, and when.
+/// The tilt the antenna was scanning at the newest radial, and when.
 #[derive(Clone, Copy, Debug)]
 pub struct Antenna {
-    /// elevation number of the sweep being scanned (matches `Sweep::number`)
-    pub number: u8,
     pub elevation: f32,
-    pub azimuth: f32,
     /// seconds since the Unix epoch
     pub time: f64,
 }
@@ -403,9 +407,7 @@ impl Decoder {
                         self.close_sweep();
                     }
                     self.vol.antenna = Some(Antenna {
-                        number,
                         elevation: radial.elevation,
-                        azimuth: radial.azimuth,
                         time: radial.time,
                     });
                     self.cur
@@ -438,11 +440,6 @@ impl Decoder {
         s.radials
             .sort_by(|a, b| a.azimuth.partial_cmp(&b.azimuth).unwrap());
         self.vol.sweeps.push(Arc::new(s));
-    }
-
-    /// The sweep being decoded right now, radials in the order they were collected.
-    pub fn in_progress(&self) -> Option<&Sweep> {
-        self.cur.as_ref()
     }
 
     /// The volume so far (site, time, finished sweeps), even with no sweep finished yet.

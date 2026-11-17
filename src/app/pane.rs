@@ -6,17 +6,12 @@ use egui::{
 };
 
 use super::App;
-use crate::level2::Moment;
+use crate::level2::{Moment, Sweep};
 use crate::render;
 
 impl App {
-    fn texture(&mut self, ctx: &egui::Context, m: Moment) -> Option<(egui::TextureHandle, f32)> {
-        let scan = self.scan.as_ref()?;
-        let sweep = scan.vol.sweep_for(m, self.tilt)?;
-        let key = (scan.generation, sweep.number, m);
-        if let Some(t) = self.textures.get(&key) {
-            return Some(t.clone());
-        }
+    /// Rasterize one sweep of one product into a texture (and its range in km).
+    fn upload(&self, ctx: &egui::Context, name: String, sweep: &Sweep, m: Moment) -> (egui::TextureHandle, f32) {
         let range = render::range_km(sweep, m).clamp(50.0, 470.0);
         let img = render::rasterize(
             sweep,
@@ -31,9 +26,70 @@ impl App {
         } else {
             TextureOptions::NEAREST
         };
-        let tex = ctx.load_texture(format!("{}-{}-{:?}", scan.key, sweep.number, m), img, opts);
-        self.textures.insert(key, (tex.clone(), range));
-        Some((tex, range))
+        (ctx.load_texture(name, img, opts), range)
+    }
+
+    fn texture(&mut self, ctx: &egui::Context, m: Moment) -> Option<(egui::TextureHandle, f32)> {
+        let scan = self.scan.as_ref()?;
+        let sweep = scan.vol.sweep_for(m, self.tilt)?;
+        let key = (scan.generation, sweep.number, m, false);
+        if let Some(t) = self.textures.get(&key) {
+            return Some(t.clone());
+        }
+        let t = self.upload(ctx, format!("{}-{}-{:?}", scan.key, sweep.number, m), sweep, m);
+        self.textures.insert(key, t.clone());
+        Some(t)
+    }
+
+    /// The previous volume's image of a tilt, shown under it while it's swept in.
+    fn old_texture(
+        &mut self,
+        ctx: &egui::Context,
+        m: Moment,
+        number: u8,
+    ) -> Option<(egui::TextureHandle, f32)> {
+        let generation = self.scan.as_ref()?.generation;
+        let key = (generation, number, m, true);
+        if let Some(t) = self.textures.get(&key) {
+            return Some(t.clone());
+        }
+        let base = self.feed.as_ref()?.base.clone()?;
+        let sweep = base.sweeps.iter().find(|s| s.number == number && s.has(m))?;
+        let t = self.upload(ctx, format!("old-{generation}-{number}-{m:?}"), sweep, m);
+        self.textures.insert(key, t.clone());
+        Some(t)
+    }
+
+    /// Part of a radar image: the slice from `from_az` clockwise for `span` degrees.
+    fn draw_wedge(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        tex: &egui::TextureHandle,
+        range: f32,
+        from_az: f32,
+        span: f32,
+    ) {
+        if span <= 0.0 {
+            return;
+        }
+        let uv = |x: f32, y: f32| pos2((x + range) / (2.0 * range), (range - y) / (2.0 * range));
+        let vertex = |x: f32, y: f32| egui::epaint::Vertex {
+            pos: self.to_screen(rect, pos2(x, y)),
+            uv: uv(x, y),
+            color: Color32::WHITE,
+        };
+        let mut mesh = egui::Mesh::with_texture(tex.id());
+        mesh.vertices.push(vertex(0.0, 0.0));
+        let steps = (span / 2.0).ceil().max(1.0) as u32;
+        for i in 0..=steps {
+            let a = (from_az + span * i as f32 / steps as f32).to_radians();
+            mesh.vertices.push(vertex(range * a.sin(), range * a.cos()));
+            if i > 0 {
+                mesh.add_triangle(0, i, i + 1);
+            }
+        }
+        painter.add(mesh);
     }
 
     /// The rotating antenna line, with a fading wedge behind it over the fresh data.
@@ -119,31 +175,40 @@ impl App {
             self.draw_outlook_fill(&painter, rect, o);
         }
 
-        // radar image
-        let mut radar_range = None;
-        if let Some((tex, range)) = self.texture(ui.ctx(), m) {
-            radar_range = Some(range);
-            let a = self.to_screen(rect, pos2(-range, range));
-            let b = self.to_screen(rect, pos2(range, -range));
+        // radar image. A tilt the radar just finished turns in over the previous scan
+        // of it, behind a rotating line.
+        let now = ui.input(|i| i.time);
+        let shown = self
+            .scan
+            .as_ref()
+            .and_then(|s| s.vol.sweep_for(m, self.tilt))
+            .map(|s| s.number);
+        let reveal = shown.and_then(|n| Some((n, self.reveal(n, now)?)));
+        let full = |s: &Self, tex: &egui::TextureHandle, range: f32| {
+            let a = s.to_screen(rect, pos2(-range, range));
+            let b = s.to_screen(rect, pos2(range, -range));
             painter.image(
                 tex.id(),
                 Rect::from_two_pos(a, b),
                 Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
-        }
-
-        // the sweep line, only where the picture is changing: the sweep this pane
-        // shows is the one being scanned
-        let now = ui.input(|i| i.time);
-        if let Some((az, number)) = self.sweep_line(now)
-            && self
-                .scan
-                .as_ref()
-                .and_then(|s| s.vol.sweep_for(m, self.tilt))
-                .is_some_and(|s| s.number == number)
-        {
-            self.draw_sweep_line(&painter, rect, az, radar_range.unwrap_or(230.0));
+        };
+        match reveal {
+            Some((n, (from_az, k))) => {
+                if let Some((old, range)) = self.old_texture(ui.ctx(), m, n) {
+                    full(self, &old, range);
+                }
+                if let Some((tex, range)) = self.texture(ui.ctx(), m) {
+                    self.draw_wedge(&painter, rect, &tex, range, from_az, 360.0 * k);
+                    self.draw_sweep_line(&painter, rect, from_az + 360.0 * k, range);
+                }
+            }
+            None => {
+                if let Some((tex, range)) = self.texture(ui.ctx(), m) {
+                    full(self, &tex, range);
+                }
+            }
         }
 
         // over the radar: main roads, state lines, rings, warnings

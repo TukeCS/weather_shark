@@ -145,7 +145,8 @@ pub struct App {
     /// a divider is being dragged: panes follow it without animating
     resizing: bool,
     hovered_pane: Option<usize>,
-    textures: HashMap<(u64, u8, Moment), (TextureHandle, f32)>,
+    /// radar images by (scan generation, sweep number, product, previous volume's)
+    textures: HashMap<(u64, u8, Moment, bool), (TextureHandle, f32)>,
 
     center: Vec2,
     zoom: f32,
@@ -162,7 +163,8 @@ pub struct App {
     feed_polls: u32,
     /// new chunks decoded this frame: rebuild the picture once, after the messages
     feed_dirty: bool,
-    line: Option<LineAnim>,
+    /// tilts that just finished, being swept in over the previous scan
+    reveals: Vec<Reveal>,
 
     alerts: Vec<(Alert, usize)>,
     seen: HashSet<String>,
@@ -314,7 +316,7 @@ impl App {
             last_feed_poll: f64::NEG_INFINITY,
             feed_polls: 0,
             feed_dirty: false,
-            line: None,
+            reveals: Vec::new(),
             alerts: Vec::new(),
             seen: HashSet::new(),
             alerts_once: false,
@@ -650,45 +652,16 @@ impl App {
             .is_some_and(|s| s.key.starts_with("live:") && s.vol.time >= t)
     }
 
-    /// The sweep line now: (azimuth, number of the sweep being scanned), while live
-    /// data is on screen and still coming in.
-    fn sweep_line(&self, now: f64) -> Option<(f32, u8)> {
+    /// A tilt being revealed on a pane showing `number`: (start azimuth, how far
+    /// round 0..1), while live data is on screen.
+    fn reveal(&self, number: u8, now: f64) -> Option<(f32, f32)> {
         if !self.cfg.sweep_line || !self.live {
             return None;
         }
         self.scan.as_ref().filter(|s| s.key.starts_with("live:"))?;
-        let l = self.line.as_ref()?;
-        // nothing new for a while (between volumes, or the feed stalled)
-        (now - l.arrived < 20.0).then(|| (l.at(now), l.number))
-    }
-
-    /// New data arrived: glide the line from where it is to the new data edge,
-    /// timed to get there about when the next chunk is due. It never guesses
-    /// ahead of the data, so it never has to jump back.
-    fn move_line(&mut self, now: f64, a: crate::level2::Antenna) {
-        match &mut self.line {
-            Some(l) if l.number == a.number && now - l.arrived < 30.0 => {
-                let shown = l.at(now);
-                // clockwise distance to the new edge; the line never goes backwards
-                let ahead = (a.azimuth - shown).rem_euclid(360.0);
-                let ahead = if ahead > 300.0 { 0.0 } else { ahead };
-                l.interval = (0.6 * l.interval + 0.4 * (now - l.arrived)).clamp(0.5, 12.0);
-                l.arrived = now;
-                l.from = shown;
-                l.to = shown + ahead;
-                l.start = now;
-            }
-            _ => {
-                self.line = Some(LineAnim {
-                    number: a.number,
-                    from: a.azimuth,
-                    to: a.azimuth,
-                    start: now,
-                    arrived: now,
-                    interval: 4.0,
-                })
-            }
-        }
+        let r = self.reveals.iter().find(|r| r.number == number)?;
+        let k = ((now - r.start) / r.dur).clamp(0.0, 1.0) as f32;
+        (k < 1.0).then_some((r.from_az, k))
     }
 
     // ---- real-time chunks ---------------------------------------------------------
@@ -798,11 +771,24 @@ impl App {
             return;
         }
         let key = f.key();
-        let antenna = vol.antenna;
+        let new_volume = self.scan.as_ref().is_none_or(|s| s.key != key);
+        // each tilt that just finished turns in once, at the speed the radar scanned it
+        for s in vol.sweeps.iter().filter(|s| dirty.contains(&s.number)) {
+            if let Some((from_az, took)) = s.scan_path() {
+                self.reveals.retain(|r| r.number != s.number);
+                self.reveals.push(Reveal {
+                    number: s.number,
+                    from_az,
+                    start: now,
+                    dur: took.clamp(2.0, 12.0),
+                });
+            }
+        }
         self.show_scan(key, Arc::new(vol));
-        self.textures.retain(|(_, n, _), _| !dirty.contains(n));
-        if let Some(a) = antenna {
-            self.move_line(now, a);
+        if !new_volume {
+            // the old images (under a reveal) stay; the finished tilts are redrawn
+            self.textures
+                .retain(|(_, n, _, old), _| *old || !dirty.contains(n));
         }
     }
 
@@ -1115,6 +1101,9 @@ impl App {
                                     && f.site == vol.site
                                 {
                                     f.base = Some(vol.clone());
+                                    // the tilts it fills in change
+                                    self.textures.clear();
+                                    self.feed_dirty = true;
                                 }
                             } else {
                                 log::debug!("early view of {key}: {} sweeps", vol.sweeps.len());
@@ -1497,8 +1486,9 @@ impl eframe::App for App {
         let repaint = if now < self.alarm_until { 0 } else { 5 };
         ctx.request_repaint_after(std::time::Duration::from_secs(repaint));
         if self.feed.is_some() && self.live {
-            // keep polling for chunks; ~30 fps while the sweep line turns
-            let ms = if self.sweep_line(now).is_some() { 33 } else { 1000 };
+            // keep polling for chunks; ~30 fps while a tilt is being swept in
+            self.reveals.retain(|r| now - r.start < r.dur);
+            let ms = if self.reveals.is_empty() { 1000 } else { 33 };
             ctx.request_repaint_after(std::time::Duration::from_millis(ms));
         }
 
@@ -1638,24 +1628,13 @@ fn is_real_tornado(a: &Alert) -> bool {
     a.event.eq_ignore_ascii_case("Tornado Warning") && !a.id.starts_with("simulated-")
 }
 
-/// The sweep line's motion: from `from` to `to` (degrees, `to` >= `from`) over the
-/// expected time between chunks, starting at `start`.
-struct LineAnim {
+/// A freshly finished tilt being swept onto the map: one turn from where the radar
+/// started it, as long as the radar took (capped), starting at `start` (UI clock).
+struct Reveal {
     number: u8,
-    from: f32,
-    to: f32,
+    from_az: f32,
     start: f64,
-    /// when data last arrived (UI clock)
-    arrived: f64,
-    /// typical time between updates
-    interval: f64,
-}
-
-impl LineAnim {
-    fn at(&self, now: f64) -> f32 {
-        let k = ((now - self.start) / self.interval).clamp(0.0, 1.0) as f32;
-        (self.from + (self.to - self.from) * k).rem_euclid(360.0)
-    }
+    dur: f64,
 }
 
 /// Small helper for muted section labels like "ACTIVE WARNINGS".
