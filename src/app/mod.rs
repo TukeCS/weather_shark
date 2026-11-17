@@ -263,6 +263,8 @@ impl App {
         let src = cc
             .storage
             .and_then(|s| s.get_string(STORE_KEY))
+            // empty: nothing edited, so take this version's default
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| crate::config::DEFAULT_LUA.to_string());
 
         let (mut cfg, cfg_error) = match Config::from_lua(&src) {
@@ -1884,7 +1886,10 @@ impl eframe::App for App {
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         #[cfg(target_arch = "wasm32")]
         if !self.editor_dirty && self.shot.is_none() {
-            _storage.set_string(STORE_KEY, self.editor.clone());
+            // Only keep a config you changed: an untouched default stored here would
+            // stay frozen at this version and hide what later defaults add.
+            let edited = self.editor != crate::config::DEFAULT_LUA;
+            _storage.set_string(STORE_KEY, if edited { self.editor.clone() } else { String::new() });
         }
     }
 }
